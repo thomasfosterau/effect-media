@@ -16,6 +16,7 @@ None is set up yet. The first code change brings in the toolchain the sibling `@
 ## Coding guidelines
 
 - Use Effect v4 idioms throughout, and prefer Effect's own modules (`Option`, `Result`, `Array`, `Match`, `Schema`, `Stream`, …) to re-inventing them. Exceptions: non-Effect APIs (codecs, platform media APIs), adapted at the edge, and hot paths where a measurement shows plain code is needed. Read the installed `effect` package (`node_modules/effect/`) rather than guessing at its API.
+- Exports follow Effect v4's layout: `index.ts` re-exports each module as a PascalCase namespace (`export * as Foo from "./Foo.ts"`), and each module is also importable through its own PascalCase subpath (`./Foo`).
 - Fix lint findings rather than disabling rules; a rule is turned off only in config, scoped and with its reason.
 
 ### Comments
