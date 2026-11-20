@@ -1,0 +1,9 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@4.0.0/schema.json",
+  "changelog": ["@changesets/changelog-github", { "repo": "thomasfosterau/effect-media" }],
+  "commit": false,
+  "format": false,
+  "access": "public",
+  "baseBranch": "main",
+  "privatePackages": { "version": false, "tag": false }
+}

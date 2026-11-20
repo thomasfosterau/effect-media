@@ -1,0 +1,69 @@
+{
+  "name": "@thomasfosterau/effect-media",
+  "version": "0.0.0",
+  "description": "Images, graphics, audio and video for Effect: core data types and operations.",
+  "keywords": [
+    "color",
+    "effect",
+    "geometry",
+    "image",
+    "media"
+  ],
+  "homepage": "https://github.com/thomasfosterau/effect-media#readme",
+  "bugs": {
+    "url": "https://github.com/thomasfosterau/effect-media/issues"
+  },
+  "license": "MIT",
+  "author": "Thomas Foster",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thomasfosterau/effect-media.git",
+    "directory": "packages/effect-media"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./Color": {
+      "types": "./dist/Color.d.ts",
+      "default": "./dist/Color.js"
+    },
+    "./Geometry": {
+      "types": "./dist/Geometry.d.ts",
+      "default": "./dist/Geometry.js"
+    },
+    "./MediaError": {
+      "types": "./dist/MediaError.d.ts",
+      "default": "./dist/MediaError.js"
+    },
+    "./MediaType": {
+      "types": "./dist/MediaType.d.ts",
+      "default": "./dist/MediaType.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack",
+    "test": "vp test"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "catalog:",
+    "effect": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
+  },
+  "peerDependencies": {
+    "effect": "catalog:peers"
+  }
+}

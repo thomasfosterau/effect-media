@@ -11,7 +11,29 @@ Read the [README](../README.md) first. Agents should also read [AGENTS.md](../AG
 
 ## Toolchain
 
-None is set up yet. The first code change brings in the toolchain the sibling `@thomasfosterau/effect-*` libraries share: [Vite+](https://viteplus.dev) (`vp`) on pnpm with a strict catalog, Oxlint with the Effect presets, Vitest through `vite-plus/test`, `vp pack` builds, a `vp run ci` task as the single CI command, [Fallow](https://docs.fallow.tools) as a pre-commit audit, and Changesets for releases. Document its commands and gates here when it lands.
+[Vite+](https://viteplus.dev) (`vp`) manages Node and pnpm; use it rather than calling them directly (`vp exec <bin>`, not `npx`). The repository is a pnpm workspace: the core package lives in `packages/effect-media`, and each backend will get its own package beside it.
+
+| Command            | What it does                                                                             |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| `vp install`       | Dependencies, git hooks, and the Effect-patched `tsc`, Oxlint and tsrs (`prepare`)       |
+| `vp check`         | Format, and type-aware lint with the Oxlint, `@effect/tsgo` and `@enfect/oxlint` rules   |
+| `vp run check`     | The type gate: each package's `src` (no Node types), then its tests                      |
+| `vp run test:unit` | Unit and property tests (Vitest through `@effect/vitest`)                                |
+| `vp run build`     | `vp pack`: one ESM module and declaration file per public module                         |
+| `vp run ci`        | All of the above, in order: the single CI command                                        |
+| `vp run fallow`    | [Fallow](https://docs.fallow.tools): dead code, dependencies, duplication and complexity |
+
+The pre-commit hook ([.vite-hooks/pre-commit](../.vite-hooks/pre-commit)) runs `vp staged` and then `vp run fallow:audit`, which fails only on findings the change introduces against `origin/main`. Fallow's findings are guidance; trace "unused" code before deleting it (`vp exec fallow dead-code --trace <file>:<export>`).
+
+### Dependencies
+
+Every external version lives in the catalog in [pnpm-workspace.yaml](../pnpm-workspace.yaml) (`catalogMode: strict`); `package.json` files reference only `catalog:` (or `catalog:peers` for peer ranges). `effect-tsgo patch` supports only specific TypeScript, Oxlint and tsrs versions, so move `vite-plus`, `typescript` and `@effect/tsgo` together.
+
+Library source must run on every runtime (Node, Bun, Deno, browsers, Cloudflare Workers): no Node built-ins and no DOM types in `packages/*/src`. Platform APIs belong in the backend package that adapts them.
+
+### Changesets
+
+Every change to a published package's behaviour or its emitted `.d.ts` (doc comments included, as a `patch`) carries a changeset: `pnpm changeset`. README, guides, CI and tooling need none. Nothing is published yet; the release workflow comes with the first release.
 
 ## Coding guidelines
 

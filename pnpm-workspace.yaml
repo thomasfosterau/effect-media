@@ -1,0 +1,55 @@
+# Every external version lives here (`catalogMode: strict`); package.json files
+# reference only `catalog:` and `catalog:peers`. After editing, run
+# `vp install` and commit pnpm-lock.yaml.
+packages:
+  - packages/*
+
+catalogMode: strict
+
+catalog:
+  "@changesets/changelog-github": ^1.0.1
+  "@changesets/cli": ^3.0.3
+  # `effect-tsgo patch` supports only the TypeScript, oxlint and tsrs versions
+  # listed in its README; move it together with vite-plus and typescript.
+  "@effect/tsgo": 0.73.2
+  "@effect/vitest": 4.1.5
+  "@enfect/oxlint": ^0.10.0
+  "@types/node": ^26.6.5
+  effect: 4.1.5
+  fallow: 3.45.0
+  typescript: 7.0.2
+  vite-plus: 1.7.0
+  vitest: 5.1.0
+
+catalogs:
+  peers:
+    effect: ^4.1.5
+
+overrides:
+  # vite-plus ships its own build of Vite; keep every package on it.
+  vite@*: npm:@voidzero-dev/vite-plus-core@8.3.8000
+
+onlyBuiltDependencies:
+  - "@effect/tsgo"
+  - fallow
+
+minimumReleaseAgeExclude:
+  - "@effect/tsgo-darwin-arm64@0.73.2"
+  - "@effect/tsgo-darwin-x64@0.73.2"
+  - "@effect/tsgo-linux-arm64@0.73.2"
+  - "@effect/tsgo-linux-arm@0.73.2"
+  - "@effect/tsgo-linux-x64@0.73.2"
+  - "@effect/tsgo-win32-arm64@0.73.2"
+  - "@effect/tsgo-win32-x64@0.73.2"
+  - "@effect/tsgo@0.73.2"
+  - "@effect/vitest@4.1.5"
+  - "@fallow-cli/darwin-arm64@3.45.0"
+  - "@fallow-cli/darwin-x64@3.45.0"
+  - "@fallow-cli/linux-arm64-gnu@3.45.0"
+  - "@fallow-cli/linux-arm64-musl@3.45.0"
+  - "@fallow-cli/linux-x64-gnu@3.45.0"
+  - "@fallow-cli/linux-x64-musl@3.45.0"
+  - "@fallow-cli/win32-arm64-msvc@3.45.0"
+  - "@fallow-cli/win32-x64-msvc@3.45.0"
+  - effect@4.1.5
+  - fallow@3.45.0

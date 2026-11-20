@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # These move together: effect-tsgo patch supports only specific
+      # TypeScript, oxlint and tsrs versions (see pnpm-workspace.yaml).
+      toolchain:
+        patterns: ["vite-plus", "typescript", "@effect/tsgo", "vitest"]
+      effect:
+        patterns: ["effect", "@effect/*"]
+        exclude-patterns: ["@effect/tsgo"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
