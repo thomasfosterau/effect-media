@@ -5,4 +5,5 @@ Read [README.md](README.md) and [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) fir
 - You may open pull requests in this repository (GitHub MCP tools or `gh`). Say which gates ran and which couldn't.
 - Out-of-scope work you notice: file an issue and move on.
 - Write idiomatic Effect v4 (see docs/CONTRIBUTING.md).
-- The repository has no code or toolchain yet; don't assume the commands of the sibling libraries exist here.
+- The toolchain matches the sibling `@thomasfosterau/effect-*` libraries, but check the commands in docs/CONTRIBUTING.md and `vite.config.ts` rather than assuming theirs exist here.
+- `vp run test:unit` is quick; use `vp test run <file>` from the package directory while iterating.

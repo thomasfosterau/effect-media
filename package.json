@@ -1,0 +1,37 @@
+{
+  "name": "@thomasfosterau/effect-media-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Workspace root for effect-media and its backend packages.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thomasfosterau/effect-media.git"
+  },
+  "type": "module",
+  "scripts": {
+    "changeset": "changeset",
+    "version": "changeset version && vp fmt && pnpm install --lockfile-only",
+    "prepare": "vp config && effect-tsgo patch --typescript --oxlint --tsrs"
+  },
+  "devDependencies": {
+    "@changesets/changelog-github": "catalog:",
+    "@changesets/cli": "catalog:",
+    "@effect/tsgo": "catalog:",
+    "@enfect/oxlint": "catalog:",
+    "@types/node": "catalog:",
+    "fallow": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.21.0",
+      "onFail": "download"
+    }
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}
