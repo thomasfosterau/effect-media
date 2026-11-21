@@ -1,0 +1,72 @@
+{
+  "name": "@thomasfosterau/effect-media-wasm",
+  "version": "0.0.0",
+  "description": "WebAssembly image codecs (jSquash) as an effect-media backend, for every runtime.",
+  "keywords": [
+    "effect",
+    "effect-media",
+    "image",
+    "jsquash",
+    "wasm",
+    "webassembly"
+  ],
+  "homepage": "https://github.com/thomasfosterau/effect-media#readme",
+  "bugs": {
+    "url": "https://github.com/thomasfosterau/effect-media/issues"
+  },
+  "license": "MIT",
+  "author": "Thomas Foster",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thomasfosterau/effect-media.git",
+    "directory": "packages/effect-media-wasm"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./WasmBackend": {
+      "types": "./dist/WasmBackend.d.ts",
+      "default": "./dist/WasmBackend.js"
+    },
+    "./WasmNode": {
+      "types": "./dist/WasmNode.d.ts",
+      "default": "./dist/WasmNode.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@jsquash/avif": "catalog:",
+    "@jsquash/jpeg": "catalog:",
+    "@jsquash/png": "catalog:",
+    "@jsquash/resize": "catalog:",
+    "@jsquash/webp": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@thomasfosterau/effect-media": "workspace:*",
+    "@thomasfosterau/effect-media-conformance": "workspace:*",
+    "@types/node": "catalog:",
+    "effect": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
+  },
+  "peerDependencies": {
+    "@thomasfosterau/effect-media": "workspace:^",
+    "effect": "catalog:peers"
+  }
+}

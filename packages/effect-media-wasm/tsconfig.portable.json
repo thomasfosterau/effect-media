@@ -1,0 +1,6 @@
+{
+  // Everything but the Node loader, without Node's types: what must run on every runtime.
+  "extends": "./tsconfig.json",
+  "exclude": ["src/WasmNode.ts"],
+  "compilerOptions": { "types": [] }
+}
