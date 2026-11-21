@@ -5,6 +5,9 @@
     "moduleDetection": "force",
     "module": "nodenext",
     "moduleResolution": "nodenext",
+    // Workspace packages resolve each other's TypeScript source, so nothing
+    // needs building before it is type-checked or tested.
+    "customConditions": ["effect-media-source"],
     "resolveJsonModule": true,
     "strict": true,
     "exactOptionalPropertyTypes": true,

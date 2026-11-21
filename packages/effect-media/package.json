@@ -27,24 +27,59 @@
   "sideEffects": false,
   "exports": {
     ".": {
+      "effect-media-source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./Color": {
+      "effect-media-source": "./src/Color.ts",
       "types": "./dist/Color.d.ts",
       "default": "./dist/Color.js"
     },
+    "./Encoded": {
+      "effect-media-source": "./src/Encoded.ts",
+      "types": "./dist/Encoded.d.ts",
+      "default": "./dist/Encoded.js"
+    },
     "./Geometry": {
+      "effect-media-source": "./src/Geometry.ts",
       "types": "./dist/Geometry.d.ts",
       "default": "./dist/Geometry.js"
     },
+    "./Image": {
+      "effect-media-source": "./src/Image.ts",
+      "types": "./dist/Image.d.ts",
+      "default": "./dist/Image.js"
+    },
+    "./ImageBackend": {
+      "effect-media-source": "./src/ImageBackend.ts",
+      "types": "./dist/ImageBackend.d.ts",
+      "default": "./dist/ImageBackend.js"
+    },
     "./MediaError": {
+      "effect-media-source": "./src/MediaError.ts",
       "types": "./dist/MediaError.d.ts",
       "default": "./dist/MediaError.js"
     },
     "./MediaType": {
+      "effect-media-source": "./src/MediaType.ts",
       "types": "./dist/MediaType.d.ts",
       "default": "./dist/MediaType.js"
+    },
+    "./Orientation": {
+      "effect-media-source": "./src/Orientation.ts",
+      "types": "./dist/Orientation.d.ts",
+      "default": "./dist/Orientation.js"
+    },
+    "./Raster": {
+      "effect-media-source": "./src/Raster.ts",
+      "types": "./dist/Raster.d.ts",
+      "default": "./dist/Raster.js"
+    },
+    "./Transform": {
+      "effect-media-source": "./src/Transform.ts",
+      "types": "./dist/Transform.d.ts",
+      "default": "./dist/Transform.js"
     },
     "./package.json": "./package.json"
   },
