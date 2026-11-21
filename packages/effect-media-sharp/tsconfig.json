@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["src"],
+  // sharp is a Node addon and its types use Node's `Buffer`.
+  "compilerOptions": { "types": ["node"] }
+}
