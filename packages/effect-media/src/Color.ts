@@ -269,8 +269,10 @@ const parseArguments = (body: string): Option.Option<Arguments> => {
   if (Arr.isReadonlyArrayNonEmpty(extra)) {
     return Option.none();
   }
-  const tokens = main.includes(",") ? main.split(",").map((s) => s.trim()) : main.split(/\s+/);
-  const legacyAlpha = alphaToken === undefined && tokens.length === 4;
+  const legacy = main.includes(",");
+  const tokens = legacy ? main.split(",").map((s) => s.trim()) : main.split(/\s+/);
+  // Only the legacy comma syntax puts alpha in a fourth value; `color(space r g b)` also has four.
+  const legacyAlpha = legacy && alphaToken === undefined && tokens.length === 4;
   const channels = legacyAlpha ? tokens.slice(0, 3) : tokens;
   const alphaText = legacyAlpha ? tokens[3] : alphaToken;
   const alpha = alphaText === undefined ? Option.some(1) : parseValue(alphaText, 1);
