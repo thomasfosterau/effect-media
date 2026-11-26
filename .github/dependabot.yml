@@ -4,11 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    # pnpm holds back releases younger than a day (`minimumReleaseAge`), so a
-    # bump to a fresher version would fail `vp install`. Security updates
-    # ignore the cooldown.
+    # Matches pnpm's default `minimumReleaseAge` of a day, so a bump to a
+    # fresher version doesn't fail `vp install`. Security updates ignore the
+    # cooldown.
     cooldown:
-      default-days: 3
+      default-days: 1
     # A dependency joins the first group that matches it.
     groups:
       # These move together: effect-tsgo patch supports only specific
