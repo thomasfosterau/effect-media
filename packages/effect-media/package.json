@@ -5,6 +5,7 @@
   "keywords": [
     "color",
     "effect",
+    "exif",
     "geometry",
     "image",
     "media"
@@ -33,6 +34,10 @@
     "./Color": {
       "types": "./dist/Color.d.ts",
       "default": "./dist/Color.js"
+    },
+    "./Exif": {
+      "types": "./dist/Exif.d.ts",
+      "default": "./dist/Exif.js"
     },
     "./Geometry": {
       "types": "./dist/Geometry.d.ts",

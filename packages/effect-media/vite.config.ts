@@ -7,6 +7,7 @@ export default defineConfig({
     entry: {
       index: "src/index.ts",
       Color: "src/Color.ts",
+      Exif: "src/Exif.ts",
       Geometry: "src/Geometry.ts",
       MediaError: "src/MediaError.ts",
       MediaType: "src/MediaType.ts",
