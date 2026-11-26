@@ -24,6 +24,12 @@ export default defineConfig({
     options: { typeAware: true, typeCheck: true },
     overrides: [
       {
+        // The byte-stream walker the metadata parsers share: a loop, because
+        // recursion over a file's segments could overflow the stack.
+        files: ["packages/*/src/internal/scan.ts"],
+        rules: { "effect/imperative-loops": "off" },
+      },
+      {
         files: ["**/tests/**"],
         rules: {
           // Count the `assert*` helpers tests share as assertions.
