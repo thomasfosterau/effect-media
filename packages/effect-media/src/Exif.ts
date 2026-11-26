@@ -1,7 +1,8 @@
 /**
  * Reads, edits and writes EXIF metadata in plain TypeScript, so that every
- * backend and runtime sees the same tags. Reading is lenient: a malformed
- * entry is skipped rather than failing the whole read.
+ * backend and runtime sees the same tags, and strips EXIF and XMP for privacy.
+ * Reading is lenient: a malformed entry is skipped rather than failing the
+ * whole read.
  */
 import * as Arr from "effect/Array";
 import * as Data from "effect/Data";
@@ -12,6 +13,7 @@ import * as Result from "effect/Result";
 import * as Str from "effect/String";
 import * as Containers from "./internal/containers.ts";
 import * as Tiff from "./internal/tiff.ts";
+import * as Xmp from "./internal/xmp.ts";
 
 /**
  * The image file directories EXIF data is grouped into: `ifd0` describes the
@@ -118,7 +120,7 @@ export const toTiff = (self: Exif): Uint8Array => Tiff.serialize(self);
  * AVIF or JPEG XL. `None` when the file has none or the format is not one of these.
  */
 export const read = (bytes: Uint8Array): Option.Option<Exif> =>
-  Option.flatMap(Containers.locate(bytes), fromTiff);
+  Option.flatMap(Containers.find(bytes).exif, fromTiff);
 
 /**
  * Replaces the EXIF data of an image file, or adds it, without re-encoding the
@@ -132,28 +134,55 @@ export const write: {
   (exif: Exif): (bytes: Uint8Array) => Result.Result<Uint8Array, WriteError>;
   (bytes: Uint8Array, exif: Exif): Result.Result<Uint8Array, WriteError>;
 } = dual(2, (bytes: Uint8Array, exif: Exif) =>
-  Containers.replace(bytes, Option.some(toTiff(exif))),
+  Containers.replace(bytes, {
+    exif: Containers.Change.Set({ bytes: toTiff(exif) }),
+    xmp: Containers.Change.Keep(),
+  }),
 );
 
-/**
- * Removes the EXIF data from an image file, without re-encoding the image.
- * HEIF and AVIF keep the space, zeroed. XMP metadata, which can also hold a
- * location, is left as it is.
- */
-export const strip = (bytes: Uint8Array): Result.Result<Uint8Array, WriteError> =>
-  Option.isSome(Containers.locate(bytes))
-    ? Containers.replace(bytes, Option.none())
-    : Result.succeed(bytes);
+const removeIfFound = (found: Option.Option<unknown>): Containers.Change =>
+  Option.isSome(found) ? Containers.Change.Remove() : Containers.Change.Keep();
 
-/** Removes the GPS directory from an image file's EXIF data and keeps the rest. */
-export const stripLocation = (bytes: Uint8Array): Result.Result<Uint8Array, WriteError> =>
-  Option.match(
-    Option.filter(read(bytes), (exif) => HashMap.has(exif.directories, "gps")),
+/**
+ * Removes the EXIF and XMP metadata from an image file, without re-encoding
+ * the image. HEIF and AVIF keep the space, blanked. Unchanged when there is none.
+ */
+export const strip = (bytes: Uint8Array): Result.Result<Uint8Array, WriteError> => {
+  const found = Containers.find(bytes);
+  return Containers.replace(bytes, {
+    exif: removeIfFound(found.exif),
+    xmp: removeIfFound(found.xmp),
+  });
+};
+
+/**
+ * Removes where an image was taken and keeps its other metadata: the GPS
+ * directory of its EXIF, and the GPS, city, state, country and IPTC location
+ * properties of its XMP. An XMP packet that cannot be edited safely, such as a
+ * compressed one, is removed whole. Unchanged when there is no location.
+ */
+export const stripLocation = (bytes: Uint8Array): Result.Result<Uint8Array, WriteError> => {
+  const found = Containers.find(bytes);
+  const exif = Option.match(
+    Option.filter(Option.flatMap(found.exif, fromTiff), (e) => HashMap.has(e.directories, "gps")),
     {
-      onNone: () => Result.succeed(bytes),
-      onSome: (exif) => write(bytes, removeDirectory(exif, "gps")),
+      onNone: () => Containers.Change.Keep(),
+      onSome: (e) => Containers.Change.Set({ bytes: toTiff(removeDirectory(e, "gps")) }),
     },
   );
+  const xmp = Option.match(found.xmp, {
+    onNone: () => Containers.Change.Keep(),
+    onSome: (packet) =>
+      Option.match(Option.flatMap(packet, Xmp.withoutLocation), {
+        onNone: () => Containers.Change.Remove(),
+        onSome: (edited) =>
+          Option.exists(packet, (original) => original === edited)
+            ? Containers.Change.Keep()
+            : Containers.Change.Set({ bytes: edited }),
+      }),
+  });
+  return Containers.replace(bytes, { exif, xmp });
+};
 
 // --- editing -------------------------------------------------------------------
 

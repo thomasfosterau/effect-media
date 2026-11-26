@@ -1,6 +1,7 @@
-// Where each image format keeps its EXIF payload, and how to replace or remove
-// it without decoding the image.
+// Where each image format keeps its EXIF and XMP metadata, and how to replace
+// or remove them without decoding the image.
 import * as Arr from "effect/Array";
+import * as Data from "effect/Data";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import { EncodeError, UnsupportedFormat, UnsupportedOperation } from "../MediaError.ts";
@@ -24,6 +25,27 @@ import { scan } from "./scan.ts";
 import { EXIF_HEADER, TIFF_BIG, TIFF_LITTLE } from "./tiff.ts";
 
 export type WriteError = EncodeError | UnsupportedFormat | UnsupportedOperation;
+
+/** What to do with one kind of metadata. */
+export type Change = Data.TaggedEnum<{
+  Keep: Record<never, never>;
+  Remove: Record<never, never>;
+  Set: { readonly bytes: Uint8Array };
+}>;
+
+export const Change = Data.taggedEnum<Change>();
+
+/** EXIF is a TIFF structure without its `Exif\0\0` header; XMP is a serialized packet. */
+export interface Changes {
+  readonly exif: Change;
+  readonly xmp: Change;
+}
+
+/** The metadata found in a file. An XMP packet that cannot be read, such as a compressed one, is `Some(None)`. */
+export interface Found {
+  readonly exif: Option.Option<Uint8Array>;
+  readonly xmp: Option.Option<Option.Option<Uint8Array>>;
+}
 
 type Container = "jpeg" | "png" | "webp" | "tiff" | "isobmff" | "jxl-container" | "jxl-codestream";
 
@@ -52,6 +74,11 @@ const containerOf = (bytes: Uint8Array): Option.Option<Container> => {
   return ascii(bytes, 4, 4) === "ftyp" ? Option.some("isobmff") : Option.none();
 };
 
+const isKeep = Change.$is("Keep");
+
+const setBytes = (change: Change): Option.Option<Uint8Array> =>
+  Change.$is("Set")(change) ? Option.some(change.bytes) : Option.none();
+
 // --- JPEG ------------------------------------------------------------------------
 
 interface Segment {
@@ -60,8 +87,17 @@ interface Segment {
   readonly end: number;
 }
 
+const XMP_HEADER = [...asciiBytes("http://ns.adobe.com/xap/1.0/"), 0];
+const XMP_EXTENSION_HEADER = [...asciiBytes("http://ns.adobe.com/xmp/extension/"), 0];
+
+const isApp1With = (bytes: Uint8Array, segment: Segment, header: ReadonlyArray<number>): boolean =>
+  segment.marker === 0xe1 && startsWith(bytes, header, segment.start + 4);
+
 const isExifSegment = (bytes: Uint8Array, segment: Segment): boolean =>
-  segment.marker === 0xe1 && startsWith(bytes, EXIF_HEADER, segment.start + 4);
+  isApp1With(bytes, segment, EXIF_HEADER);
+
+const isXmpSegment = (bytes: Uint8Array, segment: Segment): boolean =>
+  isApp1With(bytes, segment, XMP_HEADER) || isApp1With(bytes, segment, XMP_EXTENSION_HEADER);
 
 // The marker segments before the start of scan, and where the scan starts.
 const jpegSegments = (
@@ -89,46 +125,58 @@ const jpegSegments = (
   );
 };
 
-const jpegPayload = (bytes: Uint8Array): Option.Option<Uint8Array> =>
-  Option.flatMap(jpegSegments(bytes), ({ segments }) =>
-    Option.fromUndefinedOr(segments.find((segment) => isExifSegment(bytes, segment))).pipe(
-      Option.map((segment) => bytes.subarray(segment.start + 10, segment.end)),
-    ),
+const segmentPayload = (
+  bytes: Uint8Array,
+  segments: ReadonlyArray<Segment>,
+  header: ReadonlyArray<number>,
+): Option.Option<Uint8Array> =>
+  Option.map(
+    Option.fromUndefinedOr(segments.find((segment) => isApp1With(bytes, segment, header))),
+    (segment) => bytes.subarray(segment.start + 4 + header.length, segment.end),
   );
+
+const findJpeg = (bytes: Uint8Array): Found =>
+  Option.match(jpegSegments(bytes), {
+    onNone: () => ({ exif: Option.none(), xmp: Option.none() }),
+    onSome: ({ segments }) => ({
+      exif: segmentPayload(bytes, segments, EXIF_HEADER),
+      // Extended XMP continues the main packet; editing the main packet drops it.
+      xmp: Option.map(segmentPayload(bytes, segments, XMP_HEADER), Option.some),
+    }),
+  });
 
 const MAX_SEGMENT = 0xffff;
 
-const replaceJpeg = (
-  bytes: Uint8Array,
-  payload: Option.Option<Uint8Array>,
-): Result.Result<Uint8Array, WriteError> =>
+const app1 = (header: ReadonlyArray<number>, payload: Uint8Array): Uint8Array =>
+  concat([[0xff, 0xe1], toBe32(2 + header.length + payload.length).slice(2), header, payload]);
+
+const replaceJpeg = (bytes: Uint8Array, changes: Changes): Result.Result<Uint8Array, WriteError> =>
   Option.match(jpegSegments(bytes), {
     onNone: () => Result.fail(encodeError(bytes, "the JPEG has no start of scan")),
     onSome: ({ segments, scanAt }) => {
-      const kept = segments.filter((segment) => !isExifSegment(bytes, segment));
-      // JFIF requires its APP0 segment first; EXIF goes straight after it.
-      const leading = kept.findIndex((segment) => segment.marker !== 0xe0);
-      const split = leading === -1 ? kept.length : leading;
-      const app1 = Option.map(payload, (tiff) => [
-        0xff,
-        0xe1,
-        ...toBe32(2 + EXIF_HEADER.length + tiff.length).slice(2),
-        ...EXIF_HEADER,
-      ]);
-      if (Option.exists(payload, (tiff) => 2 + EXIF_HEADER.length + tiff.length > MAX_SEGMENT)) {
+      const added = [
+        ...Option.toArray(Option.map(setBytes(changes.exif), (tiff) => app1(EXIF_HEADER, tiff))),
+        ...Option.toArray(Option.map(setBytes(changes.xmp), (xmp) => app1(XMP_HEADER, xmp))),
+      ];
+      if (added.some((segment) => segment.length - 2 > MAX_SEGMENT)) {
         return Result.fail(
-          encodeError(bytes, "the EXIF data is over the 64 KB a JPEG segment holds"),
+          encodeError(bytes, "the metadata is over the 64 KB a JPEG segment holds"),
         );
       }
+      const kept = segments.filter(
+        (segment) =>
+          !(isExifSegment(bytes, segment) && !isKeep(changes.exif)) &&
+          !(isXmpSegment(bytes, segment) && !isKeep(changes.xmp)),
+      );
+      // JFIF requires its APP0 segment first; new metadata goes straight after it.
+      const leading = kept.findIndex((segment) => segment.marker !== 0xe0);
+      const split = leading === -1 ? kept.length : leading;
       const range = ({ start, end }: Segment) => bytes.subarray(start, end);
       return Result.succeed(
         concat([
           [0xff, 0xd8],
           ...kept.slice(0, split).map(range),
-          ...Option.match(app1, {
-            onNone: () => [],
-            onSome: (header) => [header, Option.getOrElse(payload, () => new Uint8Array())],
-          }),
+          ...added,
           ...kept.slice(split).map(range),
           bytes.subarray(scanAt),
         ]),
@@ -145,9 +193,17 @@ interface Chunk {
   readonly dataEnd: number;
 }
 
-const pngChunks = (bytes: Uint8Array): Option.Option<ReadonlyArray<Chunk>> => {
+const XMP_KEYWORD = [...asciiBytes("XML:com.adobe.xmp"), 0];
+
+// The chunks up to IEND; `complete` is false when the file ends or breaks before it.
+interface Chunks {
+  readonly chunks: ReadonlyArray<Chunk>;
+  readonly complete: boolean;
+}
+
+const pngChunks = (bytes: Uint8Array): Chunks => {
   const chunks: Array<Chunk> = [];
-  return scan(8, (at): number | Option.Option<ReadonlyArray<Chunk>> => {
+  const complete = scan(8, (at) => {
     if (at + 12 > bytes.length) {
       return Option.none();
     }
@@ -157,50 +213,75 @@ const pngChunks = (bytes: Uint8Array): Option.Option<ReadonlyArray<Chunk>> => {
       return Option.none();
     }
     chunks.push({ type, start: at, dataEnd });
-    return type === "IEND" ? Option.some(chunks) : dataEnd + 4;
+    return type === "IEND" ? Option.some(true) : dataEnd + 4;
   });
+  return { chunks, complete: Option.isSome(complete) };
 };
 
-// The `eXIf` chunk comes before the image data.
-const pngPayload = (bytes: Uint8Array): Option.Option<Uint8Array> =>
-  scan(8, (at) => {
-    if (at + 8 > bytes.length) {
-      return Option.none();
-    }
-    const length = be32(bytes, at);
-    const type = ascii(bytes, at + 4, 4);
-    if (type === "eXIf") {
-      return Option.some(bytes.subarray(at + 8, at + 8 + length));
-    }
-    return type === "IDAT" || type === "IEND" ? Option.none() : at + 12 + length;
-  });
+const isXmpChunk = (bytes: Uint8Array, chunk: Chunk): boolean =>
+  chunk.type === "iTXt" && startsWith(bytes, XMP_KEYWORD, chunk.start + 8);
 
-const pngChunk = (type: string, data: Uint8Array): Uint8Array => {
+// An iTXt chunk: keyword, compression flag and method, language and translated keyword, text.
+const itxtText = (bytes: Uint8Array, chunk: Chunk): Option.Option<Uint8Array> => {
+  const flagAt = chunk.start + 8 + XMP_KEYWORD.length;
+  const language = bytes.indexOf(0, flagAt + 2);
+  const translated = language === -1 ? -1 : bytes.indexOf(0, language + 1);
+  return bytes[flagAt] !== 0 || translated === -1 || translated >= chunk.dataEnd
+    ? Option.none()
+    : Option.some(bytes.subarray(translated + 1, chunk.dataEnd));
+};
+
+const findPng = (bytes: Uint8Array): Found => {
+  const { chunks } = pngChunks(bytes);
+  const first = (predicate: (chunk: Chunk) => boolean) =>
+    Option.fromUndefinedOr(chunks.find(predicate));
+  return {
+    exif: Option.map(
+      first((chunk) => chunk.type === "eXIf"),
+      (chunk) => bytes.subarray(chunk.start + 8, chunk.dataEnd),
+    ),
+    xmp: Option.map(
+      first((chunk) => isXmpChunk(bytes, chunk)),
+      (chunk) => itxtText(bytes, chunk),
+    ),
+  };
+};
+
+const pngChunk = (type: string, data: Uint8Array | ReadonlyArray<number>): Uint8Array => {
   const body = concat([asciiBytes(type), data]);
   return concat([toBe32(data.length), body, toBe32(crc32(body))]);
 };
 
-const replacePng = (
-  bytes: Uint8Array,
-  payload: Option.Option<Uint8Array>,
-): Result.Result<Uint8Array, WriteError> =>
-  Option.match(pngChunks(bytes), {
-    onNone: () => Result.fail(encodeError(bytes, "the PNG has no IEND chunk")),
-    onSome: (chunks) => {
-      const kept = chunks.filter((chunk) => chunk.type !== "eXIf");
-      const firstData = kept.findIndex((chunk) => chunk.type === "IDAT" || chunk.type === "IEND");
-      const exif = Arr.fromOption(Option.map(payload, (tiff) => pngChunk("eXIf", tiff)));
-      const range = (chunk: Chunk) => bytes.subarray(chunk.start, chunk.dataEnd + 4);
-      return Result.succeed(
-        concat([
-          PNG_SIGNATURE,
-          ...kept.slice(0, firstData).map(range),
-          ...exif,
-          ...kept.slice(firstData).map(range),
-        ]),
-      );
-    },
-  });
+const replacePng = (bytes: Uint8Array, changes: Changes): Result.Result<Uint8Array, WriteError> => {
+  const { chunks, complete } = pngChunks(bytes);
+  if (!complete) {
+    return Result.fail(encodeError(bytes, "the PNG has no IEND chunk"));
+  }
+  const kept = chunks.filter(
+    (chunk) =>
+      !(chunk.type === "eXIf" && !isKeep(changes.exif)) &&
+      !(isXmpChunk(bytes, chunk) && !isKeep(changes.xmp)),
+  );
+  const firstData = kept.findIndex((chunk) => chunk.type === "IDAT" || chunk.type === "IEND");
+  const added = [
+    ...Arr.fromOption(Option.map(setBytes(changes.exif), (tiff) => pngChunk("eXIf", tiff))),
+    // Uncompressed, with no language or translated keyword.
+    ...Arr.fromOption(
+      Option.map(setBytes(changes.xmp), (xmp) =>
+        pngChunk("iTXt", concat([XMP_KEYWORD, [0, 0, 0, 0], xmp])),
+      ),
+    ),
+  ];
+  const range = (chunk: Chunk) => bytes.subarray(chunk.start, chunk.dataEnd + 4);
+  return Result.succeed(
+    concat([
+      PNG_SIGNATURE,
+      ...kept.slice(0, firstData).map(range),
+      ...added,
+      ...kept.slice(firstData).map(range),
+    ]),
+  );
+};
 
 // --- WebP ------------------------------------------------------------------------
 
@@ -222,19 +303,24 @@ const webpChunks = (bytes: Uint8Array): ReadonlyArray<RiffChunk> => {
   return chunks;
 };
 
-const webpPayload = (bytes: Uint8Array): Option.Option<Uint8Array> =>
-  Option.map(
-    Option.fromUndefinedOr(webpChunks(bytes).find((chunk) => chunk.type === "EXIF")),
-    (chunk) => chunk.data,
-  );
+const findWebp = (bytes: Uint8Array): Found => {
+  const chunks = webpChunks(bytes);
+  const data = (type: string) =>
+    Option.map(
+      Option.fromUndefinedOr(chunks.find((chunk) => chunk.type === type)),
+      (chunk) => chunk.data,
+    );
+  return { exif: data("EXIF"), xmp: Option.map(data("XMP "), Option.some) };
+};
 
 const riffChunk = ({ type, data }: RiffChunk): Uint8Array =>
   concat([asciiBytes(type), toLe32(data.length), data, data.length % 2 === 1 ? [0] : []]);
 
+const VP8X_XMP = 0x04;
 const VP8X_EXIF = 0x08;
 const VP8X_ALPHA = 0x10;
 
-// The VP8X header a simple (lossy or lossless) WebP needs before it can carry EXIF.
+// The VP8X header a simple (lossy or lossless) WebP needs before it can carry metadata.
 const vp8x = (image: RiffChunk): Option.Option<RiffChunk> => {
   const { type, data } = image;
   const header = (width: number, height: number, flags: number): RiffChunk => ({
@@ -254,32 +340,38 @@ const vp8x = (image: RiffChunk): Option.Option<RiffChunk> => {
 
 const replaceWebp = (
   bytes: Uint8Array,
-  payload: Option.Option<Uint8Array>,
+  changes: Changes,
 ): Result.Result<Uint8Array, WriteError> => {
-  const chunks = webpChunks(bytes).filter((chunk) => chunk.type !== "EXIF");
-  const extended = Option.fromUndefinedOr(chunks.find((chunk) => chunk.type === "VP8X"));
-  const header = Option.isSome(payload)
-    ? Option.orElse(extended, () => Option.flatMap(Option.fromUndefinedOr(chunks[0]), vp8x))
+  const all = webpChunks(bytes);
+  const keptOf = (type: string, change: Change): ReadonlyArray<RiffChunk> =>
+    Change.$match(change, {
+      Keep: () => all.filter((chunk) => chunk.type === type),
+      Remove: () => [],
+      Set: ({ bytes: data }) => [{ type, data }],
+    });
+  const exif = keptOf("EXIF", changes.exif);
+  const xmp = keptOf("XMP ", changes.xmp);
+  const hasMetadata = Arr.isReadonlyArrayNonEmpty([...exif, ...xmp]);
+  const extended = Option.fromUndefinedOr(all.find((chunk) => chunk.type === "VP8X"));
+  const header = hasMetadata
+    ? Option.orElse(extended, () => Option.flatMap(Option.fromUndefinedOr(all[0]), vp8x))
     : extended;
-  if (Option.isSome(payload) && Option.isNone(header)) {
+  if (hasMetadata && Option.isNone(header)) {
     return Result.fail(encodeError(bytes, "the WebP has no image chunk to describe"));
   }
-  const withFlag = Option.map(header, ({ data }) => {
+  const flagged = Option.map(header, ({ data }) => {
     const flags = data.slice();
-    flags[0] = Option.isSome(payload) ? (flags[0] ?? 0) | VP8X_EXIF : (flags[0] ?? 0) & ~VP8X_EXIF;
+    const others = (flags[0] ?? 0) & ~(VP8X_EXIF | VP8X_XMP);
+    flags[0] =
+      others |
+      (Arr.isReadonlyArrayNonEmpty(exif) ? VP8X_EXIF : 0) |
+      (Arr.isReadonlyArrayNonEmpty(xmp) ? VP8X_XMP : 0);
     return { type: "VP8X", data: flags };
   });
-  const body = chunks.filter((chunk) => chunk.type !== "VP8X");
-  // EXIF follows the image data and precedes XMP.
-  const xmp = body.findIndex((chunk) => chunk.type === "XMP ");
-  const split = xmp === -1 ? body.length : xmp;
-  const all = [
-    ...Option.toArray(withFlag),
-    ...body.slice(0, split),
-    ...Option.toArray(Option.map(payload, (data) => ({ type: "EXIF", data }))),
-    ...body.slice(split),
-  ];
-  const riff = concat([asciiBytes("WEBP"), ...all.map(riffChunk)]);
+  const image = all.filter((chunk) => !["VP8X", "EXIF", "XMP "].includes(chunk.type));
+  // Metadata follows the image data: EXIF, then XMP.
+  const chunks = [...Option.toArray(flagged), ...image, ...exif, ...xmp];
+  const riff = concat([asciiBytes("WEBP"), ...chunks.map(riffChunk)]);
   return Result.succeed(concat([asciiBytes("RIFF"), toLe32(riff.length), riff]));
 };
 
@@ -328,19 +420,39 @@ const fromExifPayload = (payload: Uint8Array): Option.Option<Uint8Array> =>
 const sized = (bytes: Uint8Array, at: number, size: number): number =>
   size === 8 ? be64(bytes, at) : size === 4 ? be32(bytes, at) : size === 2 ? be16(bytes, at) : 0;
 
-// The ID of the `Exif` item in an `iinf` box (ISO/IEC 14496-12, 8.11.6).
-const exifItemId = (bytes: Uint8Array, iinf: Box): Option.Option<number> => {
+const cString = (bytes: Uint8Array, at: number, end: number): readonly [string, number] => {
+  const nul = bytes.indexOf(0, at);
+  const stop = nul === -1 || nul >= end ? end : nul;
+  return [ascii(bytes, at, stop - at), stop + 1];
+};
+
+type ItemKind = "exif" | "xmp";
+
+// The kind of item an `infe` box describes, if it is metadata (ISO/IEC 23008-12, A.2).
+const itemKind = (bytes: Uint8Array, infe: Box): Option.Option<ItemKind> => {
+  const version = bytes[infe.start] ?? 0;
+  if (infe.type !== "infe" || version < 2) {
+    return Option.none();
+  }
+  const typeAt = infe.start + 4 + (version === 2 ? 2 : 4) + 2;
+  const type = ascii(bytes, typeAt, 4);
+  if (type === "Exif") {
+    return Option.some("exif");
+  }
+  const [, contentTypeAt] = cString(bytes, typeAt + 4, infe.end);
+  const [contentType] = cString(bytes, contentTypeAt, infe.end);
+  return type === "mime" && contentType === "application/rdf+xml"
+    ? Option.some("xmp")
+    : Option.none();
+};
+
+// The ID of the first item of `kind` in an `iinf` box (ISO/IEC 14496-12, 8.11.6).
+const itemId = (bytes: Uint8Array, iinf: Box, kind: ItemKind): Option.Option<number> => {
   const entries = (bytes[iinf.start] ?? 0) === 0 ? 6 : 8;
   return Option.fromUndefinedOr(
-    boxes(bytes, iinf.start + entries, iinf.end).find((infe) => {
-      const version = bytes[infe.start] ?? 0;
-      const idSize = version === 2 ? 2 : 4;
-      return (
-        infe.type === "infe" &&
-        version >= 2 &&
-        ascii(bytes, infe.start + 4 + idSize + 2, 4) === "Exif"
-      );
-    }),
+    boxes(bytes, iinf.start + entries, iinf.end).find((infe) =>
+      Option.exists(itemKind(bytes, infe), (found) => found === kind),
+    ),
   ).pipe(
     Option.map((infe) => sized(bytes, infe.start + 4, (bytes[infe.start] ?? 0) === 2 ? 2 : 4)),
   );
@@ -404,10 +516,10 @@ const itemExtents = (
   });
 };
 
-const heifExifExtents = (bytes: Uint8Array): Option.Option<ReadonlyArray<Extent>> =>
+const heifExtents = (bytes: Uint8Array, kind: ItemKind): Option.Option<ReadonlyArray<Extent>> =>
   Option.flatMap(findBox(bytes, 0, bytes.length, "meta"), (meta) =>
     Option.flatMap(childBox(bytes, meta, "iinf"), (iinf) =>
-      Option.flatMap(exifItemId(bytes, iinf), (id) =>
+      Option.flatMap(itemId(bytes, iinf, kind), (id) =>
         Option.flatMap(childBox(bytes, meta, "iloc"), (iloc) =>
           itemExtents(bytes, iloc, childBox(bytes, meta, "idat"), id),
         ),
@@ -415,58 +527,129 @@ const heifExifExtents = (bytes: Uint8Array): Option.Option<ReadonlyArray<Extent>
     ),
   );
 
-const heifPayload = (bytes: Uint8Array): Option.Option<Uint8Array> =>
-  heifExifExtents(bytes).pipe(
-    Option.map((extents) => concat(extents.map(({ start, end }) => bytes.subarray(start, end)))),
-    Option.flatMap(fromExifPayload),
-  );
+const joined = (bytes: Uint8Array, extents: ReadonlyArray<Extent>): Uint8Array =>
+  concat(extents.map(({ start, end }) => bytes.subarray(start, end)));
 
-// HEIF and AVIF locate items by absolute offsets, so EXIF is rewritten in place:
-// blanked to strip it, or overwritten when the new data fits the old space.
+const findHeif = (bytes: Uint8Array): Found => ({
+  exif: heifExtents(bytes, "exif").pipe(
+    Option.map((extents) => joined(bytes, extents)),
+    Option.flatMap(fromExifPayload),
+  ),
+  // A stripped item stays, blanked.
+  xmp: heifExtents(bytes, "xmp").pipe(
+    Option.map((extents) => joined(bytes, extents)),
+    Option.filter((packet) => packet.some((byte) => byte !== 0 && byte !== 0x20)),
+    Option.map(Option.some),
+  ),
+});
+
+// Overwrites an item in place: HEIF locates items by absolute offset, so they
+// cannot grow. `pad` fills what the new data leaves.
+const overwrite = (
+  out: Uint8Array,
+  extents: ReadonlyArray<Extent>,
+  data: Option.Option<Uint8Array>,
+  pad: number,
+): boolean =>
+  Option.match(data, {
+    onNone: () => {
+      extents.forEach(({ start, end }) => out.fill(0, start, end));
+      return true;
+    },
+    onSome: (item) => {
+      const only = Option.filter(Arr.head(extents), () => extents.length === 1);
+      if (Option.isNone(only) || item.length > only.value.end - only.value.start) {
+        return false;
+      }
+      out.fill(pad, only.value.start, only.value.end);
+      out.set(item, only.value.start);
+      return true;
+    },
+  });
+
 const replaceHeif = (
   bytes: Uint8Array,
-  payload: Option.Option<Uint8Array>,
+  changes: Changes,
 ): Result.Result<Uint8Array, WriteError> => {
-  const extents = heifExifExtents(bytes);
-  if (Option.isNone(extents)) {
-    return Option.isNone(payload)
-      ? Result.succeed(bytes)
-      : Result.fail(unsupported(bytes, "adding EXIF to a HEIF or AVIF file that has none"));
-  }
   const out = bytes.slice();
-  if (Option.isNone(payload)) {
-    extents.value.forEach(({ start, end }) => out.fill(0, start, end));
-    return Result.succeed(out);
-  }
-  const item = concat([toBe32(0), payload.value]);
-  const only = Option.filter(Arr.head(extents.value), () => extents.value.length === 1);
-  if (Option.isNone(only) || item.length > only.value.end - only.value.start) {
-    return Result.fail(
-      unsupported(bytes, "EXIF larger than the space the HEIF or AVIF file has for it"),
-    );
-  }
-  out.fill(0, only.value.start, only.value.end);
-  out.set(item, only.value.start);
-  return Result.succeed(out);
+  const apply = (
+    kind: ItemKind,
+    change: Change,
+    encode: (data: Uint8Array) => Uint8Array,
+    pad: number,
+  ) =>
+    Change.$match(change, {
+      Keep: () => Result.succeed(undefined),
+      Remove: () =>
+        Option.match(heifExtents(bytes, kind), {
+          onNone: () => Result.succeed(undefined),
+          onSome: (extents) => Result.succeed(void overwrite(out, extents, Option.none(), pad)),
+        }),
+      Set: ({ bytes: data }) =>
+        Option.match(heifExtents(bytes, kind), {
+          onNone: () =>
+            Result.fail(unsupported(bytes, `adding ${kind} to a HEIF or AVIF file that has none`)),
+          onSome: (extents) =>
+            overwrite(out, extents, Option.some(encode(data)), pad)
+              ? Result.succeed(undefined)
+              : Result.fail(
+                  unsupported(
+                    bytes,
+                    `${kind} larger than the space the HEIF or AVIF file has for it`,
+                  ),
+                ),
+        }),
+    });
+  return Result.all([
+    apply("exif", changes.exif, (tiff) => concat([toBe32(0), tiff]), 0),
+    // XMP is padded with spaces, which XML allows after the packet.
+    apply("xmp", changes.xmp, (xmp) => xmp, 0x20),
+  ]).pipe(Result.map(() => out));
 };
 
-const isExifBox = (bytes: Uint8Array, box: Box): boolean =>
-  box.type === "Exif" || (box.type === "brob" && ascii(bytes, box.start, 4) === "Exif");
+const isMetadataBox = (bytes: Uint8Array, box: Box, type: string): boolean =>
+  box.type === type || (box.type === "brob" && ascii(bytes, box.start, 4) === type);
 
-const jxlPayload = (bytes: Uint8Array): Option.Option<Uint8Array> =>
-  Option.flatMap(findBox(bytes, 0, bytes.length, "Exif"), (box) =>
-    fromExifPayload(bytes.subarray(box.start, box.end)),
+const findJxl = (bytes: Uint8Array): Found => {
+  const top = boxes(bytes, 0, bytes.length);
+  const find = (type: string) => Option.fromUndefinedOr(top.find((box) => box.type === type));
+  const compressedXmp = top.some(
+    (box) => box.type === "brob" && ascii(bytes, box.start, 4) === "xml ",
   );
+  return {
+    exif: Option.flatMap(find("Exif"), (box) =>
+      fromExifPayload(bytes.subarray(box.start, box.end)),
+    ),
+    xmp: Option.match(find("xml "), {
+      onNone: () => (compressedXmp ? Option.some(Option.none()) : Option.none()),
+      onSome: (box) => Option.some(Option.some(bytes.subarray(box.start, box.end))),
+    }),
+  };
+};
 
-const exifBox = (tiff: Uint8Array): Uint8Array =>
-  concat([toBe32(8 + 4 + tiff.length), asciiBytes("Exif"), toBe32(0), tiff]);
+const metadataBoxes = (changes: Changes): ReadonlyArray<Uint8Array> => [
+  ...Option.toArray(
+    Option.map(setBytes(changes.exif), (tiff) =>
+      concat([toBe32(8 + 4 + tiff.length), asciiBytes("Exif"), toBe32(0), tiff]),
+    ),
+  ),
+  ...Option.toArray(
+    Option.map(setBytes(changes.xmp), (xmp) =>
+      concat([toBe32(8 + xmp.length), asciiBytes("xml "), xmp]),
+    ),
+  ),
+];
 
-// JPEG XL keeps EXIF in a top-level `Exif` box (or a Brotli-compressed `brob` one).
+// JPEG XL keeps metadata in top-level `Exif` and `xml ` boxes, or Brotli-compressed `brob` ones.
 const replaceJxlContainer = (
   bytes: Uint8Array,
-  payload: Option.Option<Uint8Array>,
+  changes: Changes,
 ): Result.Result<Uint8Array, WriteError> => {
-  const kept = boxes(bytes, 0, bytes.length).filter((box) => !isExifBox(bytes, box));
+  const kept = boxes(bytes, 0, bytes.length).filter(
+    (box) =>
+      !(isMetadataBox(bytes, box, "Exif") && !isKeep(changes.exif)) &&
+      !(isMetadataBox(bytes, box, "xml ") && !isKeep(changes.xmp)),
+  );
   // After the signature, `ftyp` and the optional `jxll` level box, which lead the file.
   const leading = kept.findIndex((box) => !["JXL ", "ftyp", "jxll"].includes(box.type));
   const split = leading === -1 ? kept.length : leading;
@@ -474,31 +657,31 @@ const replaceJxlContainer = (
   return Result.succeed(
     concat([
       ...kept.slice(0, split).map(range),
-      ...Option.toArray(Option.map(payload, exifBox)),
+      ...metadataBoxes(changes),
       ...kept.slice(split).map(range),
     ]),
   );
 };
 
-// A bare codestream has nowhere for EXIF, so writing wraps it in the container format.
+// A bare codestream has nowhere for metadata, so adding some wraps it in the container format.
 const replaceJxlCodestream = (
   bytes: Uint8Array,
-  payload: Option.Option<Uint8Array>,
-): Result.Result<Uint8Array, WriteError> =>
-  Result.succeed(
-    Option.match(payload, {
-      onNone: () => bytes,
-      onSome: (tiff) =>
-        concat([
+  changes: Changes,
+): Result.Result<Uint8Array, WriteError> => {
+  const added = metadataBoxes(changes);
+  return Result.succeed(
+    Arr.isReadonlyArrayNonEmpty(added)
+      ? concat([
           JXL_SIGNATURE_BOX,
           [0, 0, 0, 0x14, ...asciiBytes("ftypjxl "), 0, 0, 0, 0, ...asciiBytes("jxl ")],
-          exifBox(tiff),
+          ...added,
           toBe32(8 + bytes.length),
           asciiBytes("jxlc"),
           bytes,
-        ]),
-    }),
+        ])
+      : bytes,
   );
+};
 
 // --- dispatch ----------------------------------------------------------------------
 
@@ -519,15 +702,18 @@ const unsupported = (bytes: Uint8Array, detail: string): UnsupportedOperation =>
     detail,
   });
 
-const locators = {
-  jpeg: jpegPayload,
-  png: pngPayload,
-  webp: webpPayload,
-  tiff: Option.some,
-  isobmff: heifPayload,
-  "jxl-container": jxlPayload,
-  "jxl-codestream": () => Option.none(),
-} satisfies Record<Container, (bytes: Uint8Array) => Option.Option<Uint8Array>>;
+const nothing: Found = { exif: Option.none(), xmp: Option.none() };
+
+const finders = {
+  jpeg: findJpeg,
+  png: findPng,
+  webp: findWebp,
+  // TIFF's XMP is a tag of its first directory, inside the EXIF structure.
+  tiff: (bytes) => ({ exif: Option.some(bytes), xmp: Option.none() }),
+  isobmff: findHeif,
+  "jxl-container": findJxl,
+  "jxl-codestream": () => nothing,
+} satisfies Record<Container, (bytes: Uint8Array) => Found>;
 
 const replacers = {
   jpeg: replaceJpeg,
@@ -539,22 +725,27 @@ const replacers = {
   "jxl-codestream": replaceJxlCodestream,
 } satisfies Record<
   Container,
-  (bytes: Uint8Array, payload: Option.Option<Uint8Array>) => Result.Result<Uint8Array, WriteError>
+  (bytes: Uint8Array, changes: Changes) => Result.Result<Uint8Array, WriteError>
 >;
 
-/** The TIFF-structured EXIF payload of an image file, without any `Exif\0\0` header. */
-export const locate = (bytes: Uint8Array): Option.Option<Uint8Array> =>
-  Option.flatMap(containerOf(bytes), (container) => locators[container](bytes));
+/** The EXIF and XMP metadata of an image file. */
+export const find = (bytes: Uint8Array): Found =>
+  Option.match(containerOf(bytes), {
+    onNone: () => nothing,
+    onSome: (container) => finders[container](bytes),
+  });
 
-/** Replaces an image file's EXIF payload, or removes it when `payload` is `None`. */
+/** Applies changes to an image file's metadata. */
 export const replace = (
   bytes: Uint8Array,
-  payload: Option.Option<Uint8Array>,
+  changes: Changes,
 ): Result.Result<Uint8Array, WriteError> =>
-  Option.match(containerOf(bytes), {
-    onNone: () =>
-      Result.fail(
-        new UnsupportedFormat({ backend: "core", ...mediaTypeOf(bytes), direction: "encode" }),
-      ),
-    onSome: (container) => replacers[container](bytes, payload),
-  });
+  isKeep(changes.exif) && isKeep(changes.xmp)
+    ? Result.succeed(bytes)
+    : Option.match(containerOf(bytes), {
+        onNone: () =>
+          Result.fail(
+            new UnsupportedFormat({ backend: "core", ...mediaTypeOf(bytes), direction: "encode" }),
+          ),
+        onSome: (container) => replacers[container](bytes, changes),
+      });

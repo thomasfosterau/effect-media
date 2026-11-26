@@ -8,6 +8,7 @@ import * as P from "effect/Predicate";
 import * as Result from "effect/Result";
 import * as Exif from "../src/Exif.ts";
 import { crc32 } from "../src/internal/bytes.ts";
+import * as Containers from "../src/internal/containers.ts";
 
 const some = <A>(option: Option.Option<A>): A =>
   Option.match(option, { onNone: () => assert.fail("expected Some"), onSome: (value) => value });
@@ -240,26 +241,42 @@ const vp8l = (): readonly [string, ReadonlyArray<number>] => {
 };
 
 // A HEIF whose Exif item lives in `idat`, with `room` bytes for it.
-const heif = (payload: ReadonlyArray<number>, room = payload.length + 4): Uint8Array => {
+// A HEIF whose Exif item (with `room` bytes) and optional XMP item live in `idat`.
+const heif = (
+  payload: ReadonlyArray<number>,
+  room = payload.length + 4,
+  xmp: ReadonlyArray<number> = [],
+): Uint8Array => {
   const ftyp = box("ftyp", ascii("heic"), [0, 0, 0, 0], ascii("mif1"));
   const item = [
     ...be32(0),
     ...payload,
     ...Array.from({ length: room - payload.length - 4 }, () => 0),
   ];
-  const infe = (id: number, type: string) =>
-    box("infe", [2, 0, 0, 0], be16(id), [0, 0], ascii(type), [0]);
-  const iinf = box("iinf", [0, 0, 0, 0], be16(2), infe(1, "hvc1"), infe(2, "Exif"));
-  // iloc version 1, 4-byte offsets and lengths, no base offset; the Exif item uses idat.
+  const hasXmp = Arr.isReadonlyArrayNonEmpty(xmp);
+  const infe = (id: number, type: string, contentType = "") =>
+    box("infe", [2, 0, 0, 0], be16(id), [0, 0], ascii(type), [0], [...ascii(contentType), 0]);
+  const iinf = box(
+    "iinf",
+    [0, 0, 0, 0],
+    be16(hasXmp ? 3 : 2),
+    infe(1, "hvc1"),
+    infe(2, "Exif"),
+    hasXmp ? infe(3, "mime", "application/rdf+xml") : [],
+  );
+  // iloc version 1, 4-byte offsets and lengths, no base offset; metadata items use idat.
   const iloc = box(
     "iloc",
     [1, 0, 0, 0],
     [0x44, 0x00],
-    be16(2),
+    be16(hasXmp ? 3 : 2),
     [...be16(1), 0, 0, 0, 0, ...be16(1), ...be32(0), ...be32(1)],
     [...be16(2), 0, 1, 0, 0, ...be16(1), ...be32(1), ...be32(item.length)],
+    hasXmp
+      ? [...be16(3), 0, 1, 0, 0, ...be16(1), ...be32(1 + item.length), ...be32(xmp.length)]
+      : [],
   );
-  const idat = box("idat", [0xaa], item);
+  const idat = box("idat", [0xaa], item, xmp);
   const meta = box(
     "meta",
     [0, 0, 0, 0],
@@ -283,6 +300,49 @@ const jxl = (exif: Option.Option<ReadonlyArray<number>>): Uint8Array =>
     ...Option.match(exif, { onNone: () => [], onSome: (data) => box("Exif", be32(0), data) }),
     ...box("jxlc", jxlCodestream),
   ]);
+
+// --- XMP fixtures ------------------------------------------------------------------
+
+const xmpPacket = ascii(
+  `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>` +
+    `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
+    `<rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" ` +
+    `xmlns:e="http://ns.adobe.com/exif/1.0/" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/" ` +
+    `xmp:Rating="5" e:GPSLatitude="33,52.315S" photoshop:City='Sydney'>` +
+    `<e:GPSLongitude>151,12.6E</e:GPSLongitude><e:GPSVersionID/><e:ExposureTime>1/250</e:ExposureTime>` +
+    `</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>`,
+);
+
+const xmpOf = (bytes: Uint8Array): Option.Option<string> =>
+  Option.map(Option.flatten(Containers.find(bytes).xmp), (packet) =>
+    String.fromCharCode(...packet),
+  );
+
+const assertLocationFree = (xmp: Option.Option<string>) => {
+  const text = some(xmp);
+  assert.include(text, `xmp:Rating="5"`);
+  assert.include(text, "<e:ExposureTime>1/250</e:ExposureTime>");
+  assert.notInclude(text, "GPS");
+  assert.notInclude(text, "Sydney");
+};
+
+const XMP_NS = [...ascii("http://ns.adobe.com/xap/1.0/"), 0];
+
+const jpegWithXmp = (exif: Uint8Array, xmp: ReadonlyArray<number>): Uint8Array => {
+  const file = jpeg(exif);
+  const segment = [0xff, 0xe1, ...be16(2 + XMP_NS.length + xmp.length), ...XMP_NS, ...xmp];
+  // After SOI and APP0.
+  return Uint8Array.from([...file.subarray(0, 8), ...segment, ...file.subarray(8)]);
+};
+
+const itxt = (text: ReadonlyArray<number>, compressed = false) =>
+  pngChunk("iTXt", [...ascii("XML:com.adobe.xmp"), 0, compressed ? 1 : 0, 0, 0, 0, ...text]);
+
+const pngWithXmp = (chunk: ReadonlyArray<number>): Uint8Array => {
+  const file = png(Option.some([...sample]));
+  // After the signature and IHDR (8 + 25 bytes).
+  return Uint8Array.from([...file.subarray(0, 33), ...chunk, ...file.subarray(33)]);
+};
 
 const assertSample = (exif: Option.Option<Exif.Exif>) => {
   const value = some(exif);
@@ -549,6 +609,68 @@ describe("Exif", () => {
         Option.map(unknownWrite, (e) => e._tag),
         Option.some("UnsupportedFormat"),
       );
+    });
+  });
+
+  describe("XMP", () => {
+    const written = (result: Result.Result<Uint8Array, Exif.WriteError>): Uint8Array =>
+      Result.match(result, {
+        onFailure: (error) => assert.fail(error.message),
+        onSuccess: (bytes) => bytes,
+      });
+    const files: ReadonlyArray<readonly [string, Uint8Array]> = [
+      ["JPEG", jpegWithXmp(sample, xmpPacket)],
+      ["PNG", pngWithXmp(itxt(xmpPacket))],
+      ["WebP", riff(vp8l(), ["EXIF", [...sample]], ["XMP ", xmpPacket])],
+      ["JPEG XL", Uint8Array.from([...jxl(Option.some([...sample])), ...box("xml ", xmpPacket)])],
+      ["HEIF", heif([...sample], sample.length + 4, xmpPacket)],
+    ];
+
+    files.forEach(([name, file]) => {
+      it(`${name}: strip removes EXIF and XMP`, () => {
+        assert.isTrue(Option.isSome(xmpOf(file)));
+        const stripped = written(Exif.strip(file));
+        assertNone(Exif.read(stripped));
+        assertNone(xmpOf(stripped));
+      });
+
+      it(`${name}: stripLocation edits XMP and keeps its other properties`, () => {
+        const out = written(Exif.stripLocation(file));
+        assertLocationFree(xmpOf(out));
+        const exif = some(Exif.read(out));
+        assertNone(Exif.location(exif));
+        assert.deepStrictEqual(Exif.make(exif), Option.some("Fujifilm"));
+      });
+    });
+
+    it("WebP: flags XMP in the VP8X header, and clears the flag when stripped", () => {
+      const file = riff(vp8l(), ["XMP ", xmpPacket]);
+      const flags = (bytes: Uint8Array) => bytes[20] ?? 0;
+      const out = written(Exif.stripLocation(file));
+      assert.strictEqual(flags(out) & 0x0c, 0x04);
+      assert.strictEqual(flags(written(Exif.strip(out))) & 0x0c, 0);
+    });
+
+    it("removes a compressed PNG packet whole, since it cannot be edited", () => {
+      const file = pngWithXmp(itxt([0x78, 0x9c, 1, 2, 3], true));
+      assert.isTrue(Option.isSome(Containers.find(file).xmp));
+      const out = written(Exif.stripLocation(file));
+      assertNone(Containers.find(out).xmp);
+    });
+
+    it("removes a packet whole when coordinates survive the edit", () => {
+      // A prefix bound to no known namespace hides the coordinates from the edit.
+      const hidden = ascii(
+        `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description q:GPSLatitude="1"/></rdf:RDF></x:xmpmeta>`,
+      );
+      const out = written(Exif.stripLocation(riff(vp8l(), ["XMP ", hidden])));
+      assertNone(Containers.find(out).xmp);
+    });
+
+    it("leaves a file without location as it is", () => {
+      const quiet = ascii(`<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF/></x:xmpmeta>`);
+      const file = riff(vp8l(), ["XMP ", quiet]);
+      assert.strictEqual(written(Exif.stripLocation(file)), file);
     });
   });
 });

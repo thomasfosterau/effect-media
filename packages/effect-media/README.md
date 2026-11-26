@@ -7,7 +7,7 @@ The core of [effect-media](../../README.md): media data types and operations for
 | `Geometry`   | Points, sizes, rectangles and 2D affine matrices                                       |
 | `Color`      | Colours in sRGB, linear sRGB, Display P3, Oklab and Oklch; conversions and CSS parsing |
 | `MediaType`  | Media types, file-extension lookup and content sniffing                                |
-| `Exif`       | Reading, editing, writing and stripping EXIF metadata                                  |
+| `Exif`       | Reading, editing and writing EXIF; stripping EXIF and XMP, or just the location        |
 | `MediaError` | The typed errors every backend reports                                                 |
 
 ```ts
