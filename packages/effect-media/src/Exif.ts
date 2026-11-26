@@ -1,55 +1,55 @@
 /**
- * Reads EXIF metadata in plain TypeScript, so that every backend and runtime
- * sees the same tags. Parsing is lenient: a malformed entry is skipped rather
- * than failing the whole read, and every offset is bounds-checked.
+ * Reads, edits and writes EXIF metadata in plain TypeScript, so that every
+ * backend and runtime sees the same tags. Reading is lenient: a malformed
+ * entry is skipped rather than failing the whole read.
  */
 import * as Arr from "effect/Array";
 import * as Data from "effect/Data";
 import { dual } from "effect/Function";
 import * as HashMap from "effect/HashMap";
-import * as Match from "effect/Match";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Str from "effect/String";
-import { scan } from "./internal/scan.ts";
+import * as Containers from "./internal/containers.ts";
+import * as Tiff from "./internal/tiff.ts";
 
 /**
  * The image file directories EXIF data is grouped into: `ifd0` describes the
  * main image, `exif` the capture, `gps` the location, `interop` compatibility
  * details and `ifd1` the embedded thumbnail.
  */
-export type Directory = "ifd0" | "exif" | "gps" | "interop" | "ifd1";
+export type Directory = Tiff.Directory;
 
 /** A TIFF rational, kept as stored. */
-export interface Rational {
-  readonly numerator: number;
-  readonly denominator: number;
-}
+export type Rational = Tiff.Rational;
+
+/** The TIFF field types that hold numbers: unsigned and signed integers of 8, 16 and 32 bits, and floats. */
+export type NumberType = Tiff.NumberType;
 
 /**
- * A tag's value, by TIFF field type: text (ASCII), numbers (the integer and
- * floating-point types), rationals, or opaque bytes (UNDEFINED).
+ * A tag's value, by TIFF field type: text (ASCII), numbers, rationals, or
+ * opaque bytes (UNDEFINED). Numbers and rationals keep their stored type, so
+ * that writing them back produces the same field.
  */
-export type Value = Data.TaggedEnum<{
-  Text: { readonly value: string };
-  Numbers: { readonly values: ReadonlyArray<number> };
-  Rationals: { readonly values: ReadonlyArray<Rational> };
-  Bytes: { readonly bytes: Uint8Array };
-}>;
+export type Value = Tiff.Value;
 
 /** Constructors, guards and matching for {@link Value}. */
-export const Value = Data.taggedEnum<Value>();
+export const Value = Tiff.Value;
 
 /** The tags of one directory, by tag number. */
-export type Tags = HashMap.HashMap<number, Value>;
+export type Tags = Tiff.Tags;
 
 /** The EXIF data of an image: every readable tag, by directory, and the thumbnail if there is one. */
 export class Exif extends Data.Class<{
   readonly littleEndian: boolean;
-  /** Pointers from one directory to another are left out. */
+  /** Offsets between directories, and to the thumbnail, are left out and recomputed on writing. */
   readonly directories: HashMap.HashMap<Directory, Tags>;
-  /** The JPEG thumbnail stored in `ifd1`. */
+  /** The JPEG thumbnail stored with `ifd1`. */
   readonly thumbnail: Option.Option<Uint8Array>;
 }> {}
+
+/** Any error writing EXIF to a file can fail with. */
+export type WriteError = Containers.WriteError;
 
 /** Numbers of commonly used tags, for {@link get}. Each comment names its directory. */
 export const Tag = {
@@ -99,138 +99,7 @@ export const Tag = {
   GPSAltitude: 0x0006,
 } as const;
 
-// --- TIFF structure ------------------------------------------------------------
-
-const EXIF_POINTER = 0x8769;
-const GPS_POINTER = 0x8825;
-const INTEROP_POINTER = 0xa005;
-const THUMBNAIL_OFFSET = 0x0201;
-const THUMBNAIL_LENGTH = 0x0202;
-
-interface Reader {
-  readonly bytes: Uint8Array;
-  readonly view: DataView;
-  readonly little: boolean;
-}
-
-interface FieldType {
-  readonly size: number;
-  readonly kind: "text" | "number" | "rational" | "bytes";
-  readonly read: (view: DataView, at: number, little: boolean) => number;
-}
-
-const uint8: FieldType = { size: 1, kind: "number", read: (view, at) => view.getUint8(at) };
-const uint32: FieldType["read"] = (view, at, little) => view.getUint32(at, little);
-const int32: FieldType["read"] = (view, at, little) => view.getInt32(at, little);
-
-// TIFF field types 1 to 13 (TIFF 6.0, section 2); 13 is IFD, read as LONG.
-const fieldTypes: ReadonlyArray<FieldType> = [
-  uint8,
-  { ...uint8, kind: "text" },
-  { size: 2, kind: "number", read: (view, at, little) => view.getUint16(at, little) },
-  { size: 4, kind: "number", read: uint32 },
-  { size: 8, kind: "rational", read: uint32 },
-  { size: 1, kind: "number", read: (view, at) => view.getInt8(at) },
-  { ...uint8, kind: "bytes" },
-  { size: 2, kind: "number", read: (view, at, little) => view.getInt16(at, little) },
-  { size: 4, kind: "number", read: int32 },
-  { size: 8, kind: "rational", read: int32 },
-  { size: 4, kind: "number", read: (view, at, little) => view.getFloat32(at, little) },
-  { size: 8, kind: "number", read: (view, at, little) => view.getFloat64(at, little) },
-  { size: 4, kind: "number", read: uint32 },
-];
-
-const fits = (reader: Reader, at: number, length: number): boolean =>
-  at >= 0 && length >= 0 && at + length <= reader.bytes.length;
-
-const u16 = (reader: Reader, at: number): number => reader.view.getUint16(at, reader.little);
-const u32 = (reader: Reader, at: number): number => reader.view.getUint32(at, reader.little);
-
-const fromCharCodes = (bytes: Uint8Array): string =>
-  Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
-
-const decodeUtf8 = Option.liftThrowable((bytes: Uint8Array) =>
-  decodeURIComponent(
-    Array.from(bytes, (byte) => `%${byte.toString(16).padStart(2, "0")}`).join(""),
-  ),
-);
-
-// EXIF says ASCII, but many writers use UTF-8; Latin-1 when the bytes are not valid UTF-8.
-const decodeText = (bytes: Uint8Array): string => {
-  const end = bytes.indexOf(0);
-  const text = end === -1 ? bytes : bytes.subarray(0, end);
-  return text.every((byte) => byte < 0x80)
-    ? fromCharCodes(text)
-    : Option.getOrElse(decodeUtf8(text), () => fromCharCodes(text));
-};
-
-const readValue = (reader: Reader, entry: number): Option.Option<Value> => {
-  const count = u32(reader, entry + 4);
-  return Arr.get(fieldTypes, u16(reader, entry + 2) - 1).pipe(
-    Option.filter(() => count > 0),
-    Option.flatMap((type) => {
-      const length = type.size * count;
-      const at = length <= 4 ? entry + 8 : u32(reader, entry + 8);
-      if (!fits(reader, at, length)) {
-        return Option.none();
-      }
-      const read = (i: number) => type.read(reader.view, at + i, reader.little);
-      const values = Array.from({ length: count }, (_, i) => i * type.size);
-      return Option.some(
-        Match.value(type.kind).pipe(
-          Match.when("text", () =>
-            Value.Text({ value: decodeText(reader.bytes.subarray(at, at + length)) }),
-          ),
-          Match.when("bytes", () => Value.Bytes({ bytes: reader.bytes.slice(at, at + length) })),
-          Match.when("rational", () =>
-            Value.Rationals({
-              values: values.map((i) => ({ numerator: read(i), denominator: read(i + 4) })),
-            }),
-          ),
-          Match.when("number", () => Value.Numbers({ values: values.map(read) })),
-          Match.exhaustive,
-        ),
-      );
-    }),
-  );
-};
-
-interface Ifd {
-  readonly tags: Tags;
-  readonly next: number;
-}
-
-const readIfd = (reader: Reader, offset: number): Option.Option<Ifd> => {
-  if (offset < 8 || !fits(reader, offset, 2)) {
-    return Option.none();
-  }
-  const count = u16(reader, offset);
-  const entries = Array.from({ length: count }, (_, i) => offset + 2 + i * 12).filter((entry) =>
-    fits(reader, entry, 12),
-  );
-  const tags = HashMap.fromIterable(
-    Arr.getSomes(
-      entries.map((entry) =>
-        Option.map(readValue(reader, entry), (value) => [u16(reader, entry), value] as const),
-      ),
-    ),
-  );
-  const nextAt = offset + 2 + count * 12;
-  return Option.some({ tags, next: fits(reader, nextAt, 4) ? u32(reader, nextAt) : 0 });
-};
-
-const firstNumber = (tags: Tags, tag: number): Option.Option<number> =>
-  HashMap.get(tags, tag).pipe(
-    Option.filter(Value.$is("Numbers")),
-    Option.flatMap(({ values }) => Arr.head(values)),
-  );
-
-const EXIF_HEADER = [0x45, 0x78, 0x69, 0x66, 0, 0];
-const TIFF_LITTLE = [0x49, 0x49, 0x2a, 0];
-const TIFF_BIG = [0x4d, 0x4d, 0, 0x2a];
-
-const startsWith = (bytes: Uint8Array, signature: ReadonlyArray<number>, at = 0): boolean =>
-  bytes.length >= at + signature.length && signature.every((b, i) => bytes[at + i] === b);
+// --- reading and writing -------------------------------------------------------
 
 /**
  * Reads a TIFF-structured EXIF payload: the contents of a JPEG APP1 segment,
@@ -238,275 +107,112 @@ const startsWith = (bytes: Uint8Array, signature: ReadonlyArray<number>, at = 0)
  * header. Use it for EXIF a backend hands over as bytes, such as sharp's
  * `metadata().exif`; {@link read} finds the payload in an image file.
  */
-export const fromTiff = (input: Uint8Array): Option.Option<Exif> => {
-  const bytes = startsWith(input, EXIF_HEADER) ? input.subarray(EXIF_HEADER.length) : input;
-  const isLittle = startsWith(bytes, TIFF_LITTLE);
-  if ((!isLittle && !startsWith(bytes, TIFF_BIG)) || bytes.length < 8) {
-    return Option.none();
-  }
-  const reader: Reader = {
-    bytes,
-    view: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
-    little: isLittle,
-  };
-  // Offsets already read, so that directories pointing at each other cannot loop.
-  const visited: Array<number> = [];
-  const directory = (offset: number): Option.Option<Ifd> => {
-    if (visited.includes(offset)) {
-      return Option.none();
-    }
-    visited.push(offset);
-    return readIfd(reader, offset);
-  };
-  const pointed = (from: Option.Option<Ifd>, tag: number): Option.Option<Ifd> =>
-    Option.flatMap(from, (ifd) => Option.flatMap(firstNumber(ifd.tags, tag), directory));
+export const fromTiff = (bytes: Uint8Array): Option.Option<Exif> =>
+  Option.map(Tiff.parse(bytes), (contents) => new Exif(contents));
 
-  return Option.map(directory(u32(reader, 4)), (ifd0) => {
-    const exif = pointed(Option.some(ifd0), EXIF_POINTER);
-    const gps = pointed(Option.some(ifd0), GPS_POINTER);
-    const interop = pointed(exif, INTEROP_POINTER);
-    const ifd1 = ifd0.next === 0 ? Option.none() : directory(ifd0.next);
-    const thumbnail = Option.flatMap(ifd1, ({ tags }) =>
-      Option.flatMap(firstNumber(tags, THUMBNAIL_OFFSET), (at) =>
-        Option.flatMap(firstNumber(tags, THUMBNAIL_LENGTH), (length) =>
-          length > 0 && fits(reader, at, length)
-            ? Option.some(bytes.slice(at, at + length))
-            : Option.none(),
-        ),
-      ),
-    );
-    const linked: ReadonlyArray<readonly [Directory, Option.Option<Tags>]> = [
-      ["ifd0", Option.some(HashMap.removeMany(ifd0.tags, [EXIF_POINTER, GPS_POINTER]))],
-      ["exif", Option.map(exif, ({ tags }) => HashMap.remove(tags, INTEROP_POINTER))],
-      ["gps", Option.map(gps, ({ tags }) => tags)],
-      ["interop", Option.map(interop, ({ tags }) => tags)],
-      ["ifd1", Option.map(ifd1, ({ tags }) => tags)],
-    ];
-    const directories = HashMap.fromIterable(
-      Arr.getSomes(linked.map(([name, tags]) => Option.map(tags, (t) => [name, t] as const))),
-    );
-    return new Exif({ littleEndian: isLittle, directories, thumbnail });
-  });
-};
-
-// --- containers ----------------------------------------------------------------
-
-const ascii = (bytes: Uint8Array, at: number, length: number): string =>
-  fromCharCodes(bytes.subarray(at, at + length));
-
-const be16 = (bytes: Uint8Array, at: number): number =>
-  ((bytes[at] ?? 0) << 8) | (bytes[at + 1] ?? 0);
-
-const be32 = (bytes: Uint8Array, at: number): number =>
-  be16(bytes, at) * 0x1_0000 + be16(bytes, at + 2);
-
-const be64 = (bytes: Uint8Array, at: number): number =>
-  be32(bytes, at) * 0x1_0000_0000 + be32(bytes, at + 4);
-
-const le32 = (bytes: Uint8Array, at: number): number =>
-  ((bytes[at] ?? 0) | ((bytes[at + 1] ?? 0) << 8) | ((bytes[at + 2] ?? 0) << 16)) +
-  (bytes[at + 3] ?? 0) * 0x100_0000;
-
-// JPEG: the APP1 segment that starts `Exif\0\0`, before the start of scan.
-const fromJpeg = (bytes: Uint8Array): Option.Option<Exif> =>
-  scan(2, (at) => {
-    if (at + 4 > bytes.length || bytes[at] !== 0xff) {
-      return Option.none();
-    }
-    const marker = bytes[at + 1] ?? 0;
-    if (marker === 0xff) {
-      // A fill byte before the marker.
-      return at + 1;
-    }
-    if (marker === 0xda || marker === 0xd9) {
-      return Option.none();
-    }
-    const end = at + 2 + be16(bytes, at + 2);
-    const exif =
-      marker === 0xe1 && startsWith(bytes, EXIF_HEADER, at + 4)
-        ? fromTiff(bytes.subarray(at + 10, end))
-        : Option.none();
-    return Option.isSome(exif) ? exif : end;
-  });
-
-// PNG: the `eXIf` chunk, which comes before the image data.
-const fromPng = (bytes: Uint8Array): Option.Option<Exif> =>
-  scan(8, (at) => {
-    if (at + 8 > bytes.length) {
-      return Option.none();
-    }
-    const length = be32(bytes, at);
-    const type = ascii(bytes, at + 4, 4);
-    if (type === "eXIf") {
-      return fromTiff(bytes.subarray(at + 8, at + 8 + length));
-    }
-    return type === "IDAT" || type === "IEND" ? Option.none() : at + 12 + length;
-  });
-
-// WebP: the RIFF `EXIF` chunk of the extended format.
-const fromWebp = (bytes: Uint8Array): Option.Option<Exif> =>
-  scan(12, (at) => {
-    if (at + 8 > bytes.length) {
-      return Option.none();
-    }
-    const length = le32(bytes, at + 4);
-    return ascii(bytes, at, 4) === "EXIF"
-      ? fromTiff(bytes.subarray(at + 8, at + 8 + length))
-      : at + 8 + length + (length % 2);
-  });
-
-interface Box {
-  readonly type: string;
-  /** Where the box's payload starts and ends. */
-  readonly start: number;
-  readonly end: number;
-}
-
-// The first ISO base media file format box of `type` in `[start, end)` (ISO/IEC 14496-12, 4.2).
-const findBox = (bytes: Uint8Array, start: number, end: number, type: string): Option.Option<Box> =>
-  scan(start, (at) => {
-    if (at + 8 > end) {
-      return Option.none();
-    }
-    const size = be32(bytes, at);
-    const header = size === 1 ? 16 : 8;
-    const total = size === 0 ? end - at : size === 1 ? be64(bytes, at + 8) : size;
-    if (total < header || at + total > end) {
-      return Option.none();
-    }
-    return ascii(bytes, at + 4, 4) === type
-      ? Option.some({ type, start: at + header, end: at + total })
-      : at + total;
-  });
-
-// A child box of a full box, whose payload starts with 4 bytes of version and flags.
-const childBox = (bytes: Uint8Array, parent: Box, type: string): Option.Option<Box> =>
-  findBox(bytes, parent.start + 4, parent.end, type);
-
-// The payload of an `Exif` item or box: a 4-byte offset to the TIFF header, then the data.
-const fromExifPayload = (payload: Uint8Array): Option.Option<Exif> =>
-  payload.length < 4 ? Option.none() : fromTiff(payload.subarray(4 + be32(payload, 0)));
-
-// An unsigned big-endian integer of 0, 2, 4 or 8 bytes, as `iloc` stores them.
-const sized = (bytes: Uint8Array, at: number, size: number): number =>
-  size === 8 ? be64(bytes, at) : size === 4 ? be32(bytes, at) : size === 2 ? be16(bytes, at) : 0;
-
-// The ID of the `Exif` item in an `iinf` box (ISO/IEC 14496-12, 8.11.6).
-const exifItemId = (bytes: Uint8Array, iinf: Box): Option.Option<number> =>
-  scan(iinf.start + ((bytes[iinf.start] ?? 0) === 0 ? 6 : 8), (at) =>
-    Option.match(findBox(bytes, at, iinf.end, "infe"), {
-      onNone: () => Option.none(),
-      onSome: (infe) => {
-        const version = bytes[infe.start] ?? 0;
-        const idSize = version === 2 ? 2 : 4;
-        return version >= 2 && ascii(bytes, infe.start + 4 + idSize + 2, 4) === "Exif"
-          ? Option.some(sized(bytes, infe.start + 4, idSize))
-          : infe.end;
-      },
-    }),
-  );
-
-const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array => {
-  const joined = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
-  parts.reduce((offset, part) => {
-    joined.set(part, offset);
-    return offset + part.length;
-  }, 0);
-  return joined;
-};
-
-// The bytes of item `id`, located by the `iloc` box (ISO/IEC 14496-12, 8.11.3).
-const itemBytes = (
-  bytes: Uint8Array,
-  iloc: Box,
-  idat: Option.Option<Box>,
-  id: number,
-): Option.Option<Uint8Array> => {
-  const version = bytes[iloc.start] ?? 0;
-  const sizes = bytes[iloc.start + 4] ?? 0;
-  const moreSizes = bytes[iloc.start + 5] ?? 0;
-  const offsetSize = sizes >> 4;
-  const lengthSize = sizes & 0xf;
-  const baseOffsetSize = moreSizes >> 4;
-  const indexSize = version === 0 ? 0 : moreSizes & 0xf;
-  const idSize = version < 2 ? 2 : 4;
-  const extentSize = indexSize + offsetSize + lengthSize;
-  const count = sized(bytes, iloc.start + 6, idSize);
-  let index = 0;
-  return scan(iloc.start + 6 + idSize, (at) => {
-    if (index >= count || at >= iloc.end) {
-      return Option.none();
-    }
-    index += 1;
-    const itemId = sized(bytes, at, idSize);
-    const methodAt = at + idSize;
-    // Construction method 0 addresses the file; 1 addresses the `idat` box.
-    const method = version === 0 ? 0 : be16(bytes, methodAt) & 0xf;
-    const baseAt = methodAt + (version === 0 ? 2 : 4);
-    const extentsAt = baseAt + baseOffsetSize + 2;
-    const extentCount = be16(bytes, baseAt + baseOffsetSize);
-    if (itemId !== id) {
-      return extentsAt + extentCount * extentSize;
-    }
-    const origin =
-      method === 0
-        ? Option.some(0)
-        : method === 1
-          ? Option.map(idat, (box) => box.start)
-          : Option.none();
-    return Option.map(origin, (start) =>
-      concat(
-        Array.from({ length: extentCount }, (_, e) => {
-          const extentAt = extentsAt + e * extentSize + indexSize;
-          const from =
-            start + sized(bytes, baseAt, baseOffsetSize) + sized(bytes, extentAt, offsetSize);
-          const length = sized(bytes, extentAt + offsetSize, lengthSize);
-          return bytes.subarray(from, length === 0 ? bytes.length : from + length);
-        }),
-      ),
-    );
-  });
-};
-
-// JPEG XL keeps EXIF in a top-level `Exif` box; HEIF and AVIF as an item of the `meta` box.
-const fromIsoBmff = (bytes: Uint8Array): Option.Option<Exif> =>
-  findBox(bytes, 0, bytes.length, "Exif").pipe(
-    Option.map((box) => bytes.subarray(box.start, box.end)),
-    Option.orElse(() =>
-      Option.flatMap(findBox(bytes, 0, bytes.length, "meta"), (meta) =>
-        Option.flatMap(childBox(bytes, meta, "iinf"), (iinf) =>
-          Option.flatMap(exifItemId(bytes, iinf), (id) =>
-            Option.flatMap(childBox(bytes, meta, "iloc"), (iloc) =>
-              itemBytes(bytes, iloc, childBox(bytes, meta, "idat"), id),
-            ),
-          ),
-        ),
-      ),
-    ),
-    Option.flatMap(fromExifPayload),
-  );
+/** Writes EXIF as a TIFF structure, without the `Exif\0\0` header: the inverse of {@link fromTiff}. */
+export const toTiff = (self: Exif): Uint8Array => Tiff.serialize(self);
 
 /**
  * Finds and reads the EXIF data in an image file: JPEG, PNG, WebP, TIFF, HEIF,
- * AVIF or JPEG XL (in its ISO container). `None` when the file has none or the
- * format is not one of these.
+ * AVIF or JPEG XL. `None` when the file has none or the format is not one of these.
  */
-export const read = (bytes: Uint8Array): Option.Option<Exif> => {
-  if (startsWith(bytes, [0xff, 0xd8])) {
-    return fromJpeg(bytes);
-  }
-  if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
-    return fromPng(bytes);
-  }
-  if (ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 4) === "WEBP") {
-    return fromWebp(bytes);
-  }
-  if (startsWith(bytes, TIFF_LITTLE) || startsWith(bytes, TIFF_BIG)) {
-    return fromTiff(bytes);
-  }
-  const firstBox = ascii(bytes, 4, 4);
-  return firstBox === "ftyp" || firstBox === "JXL " ? fromIsoBmff(bytes) : Option.none();
-};
+export const read = (bytes: Uint8Array): Option.Option<Exif> =>
+  Option.flatMap(Containers.locate(bytes), fromTiff);
+
+/**
+ * Replaces the EXIF data of an image file, or adds it, without re-encoding the
+ * image. Works for JPEG, PNG, WebP and JPEG XL. HEIF and AVIF are overwritten in
+ * place, so the new data must fit where the old was; TIFF is not supported.
+ *
+ * Offsets inside a camera's maker note are not rewritten, so some maker notes
+ * no longer parse after a write.
+ */
+export const write: {
+  (exif: Exif): (bytes: Uint8Array) => Result.Result<Uint8Array, WriteError>;
+  (bytes: Uint8Array, exif: Exif): Result.Result<Uint8Array, WriteError>;
+} = dual(2, (bytes: Uint8Array, exif: Exif) =>
+  Containers.replace(bytes, Option.some(toTiff(exif))),
+);
+
+/**
+ * Removes the EXIF data from an image file, without re-encoding the image.
+ * HEIF and AVIF keep the space, zeroed. XMP metadata, which can also hold a
+ * location, is left as it is.
+ */
+export const strip = (bytes: Uint8Array): Result.Result<Uint8Array, WriteError> =>
+  Option.isSome(Containers.locate(bytes))
+    ? Containers.replace(bytes, Option.none())
+    : Result.succeed(bytes);
+
+/** Removes the GPS directory from an image file's EXIF data and keeps the rest. */
+export const stripLocation = (bytes: Uint8Array): Result.Result<Uint8Array, WriteError> =>
+  Option.match(
+    Option.filter(read(bytes), (exif) => HashMap.has(exif.directories, "gps")),
+    {
+      onNone: () => Result.succeed(bytes),
+      onSome: (exif) => write(bytes, removeDirectory(exif, "gps")),
+    },
+  );
+
+// --- editing -------------------------------------------------------------------
+
+const modifyTags = (self: Exif, directory: Directory, f: (tags: Tags) => Tags): Exif =>
+  new Exif({
+    littleEndian: self.littleEndian,
+    thumbnail: self.thumbnail,
+    directories: HashMap.set(
+      self.directories,
+      directory,
+      f(Option.getOrElse(HashMap.get(self.directories, directory), () => HashMap.empty())),
+    ),
+  });
+
+/** Sets a tag, adding its directory if it has none. */
+export const set: {
+  (directory: Directory, tag: number, value: Value): (self: Exif) => Exif;
+  (self: Exif, directory: Directory, tag: number, value: Value): Exif;
+} = dual(4, (self: Exif, directory: Directory, tag: number, value: Value) =>
+  modifyTags(self, directory, HashMap.set(tag, value)),
+);
+
+/** Removes a tag. */
+export const remove: {
+  (directory: Directory, tag: number): (self: Exif) => Exif;
+  (self: Exif, directory: Directory, tag: number): Exif;
+} = dual(3, (self: Exif, directory: Directory, tag: number) =>
+  HashMap.has(self.directories, directory)
+    ? modifyTags(self, directory, HashMap.remove(tag))
+    : self,
+);
+
+/**
+ * Removes a whole directory, such as `gps` to drop the location. Removing
+ * `exif` removes `interop` too, and removing `ifd1` removes the thumbnail.
+ */
+export const removeDirectory: {
+  (directory: Directory): (self: Exif) => Exif;
+  (self: Exif, directory: Directory): Exif;
+} = dual(2, (self: Exif, directory: Directory) => {
+  const dropped: ReadonlyArray<Directory> =
+    directory === "exif" ? ["exif", "interop"] : [directory];
+  return new Exif({
+    littleEndian: self.littleEndian,
+    directories: HashMap.removeMany(self.directories, dropped),
+    thumbnail: directory === "ifd1" ? Option.none() : self.thumbnail,
+  });
+});
+
+/**
+ * Records a new orientation, such as 1 after the pixels have been turned
+ * upright, so that viewers do not turn them again.
+ */
+export const withOrientation: {
+  (orientation: Orientation): (self: Exif) => Exif;
+  (self: Exif, orientation: Orientation): Exif;
+} = dual(2, (self: Exif, orientation: Orientation) =>
+  set(self, "ifd0", Tag.Orientation, Value.Numbers({ type: "short", values: [orientation] })),
+);
 
 // --- tags ----------------------------------------------------------------------
 

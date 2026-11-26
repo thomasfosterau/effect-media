@@ -5,7 +5,9 @@ import * as Arr from "effect/Array";
 import * as Option from "effect/Option";
 import * as Order from "effect/Order";
 import * as P from "effect/Predicate";
+import * as Result from "effect/Result";
 import * as Exif from "../src/Exif.ts";
+import { crc32 } from "../src/internal/bytes.ts";
 
 const some = <A>(option: Option.Option<A>): A =>
   Option.match(option, { onNone: () => assert.fail("expected Some"), onSome: (value) => value });
@@ -188,6 +190,100 @@ const sample = tiff({
   thumbnail: [0xff, 0xd8, 0xff, 0xd9],
 });
 
+const pngChunk = (type: string, data: ReadonlyArray<number>) => [
+  ...be32(data.length),
+  ...ascii(type),
+  ...data,
+  0,
+  0,
+  0,
+  0,
+];
+
+const png = (exif: Option.Option<ReadonlyArray<number>>): Uint8Array =>
+  Uint8Array.from([
+    0x89,
+    0x50,
+    0x4e,
+    0x47,
+    0x0d,
+    0x0a,
+    0x1a,
+    0x0a,
+    ...pngChunk(
+      "IHDR",
+      Array.from({ length: 13 }, () => 0),
+    ),
+    ...Option.match(exif, { onNone: () => [], onSome: (data) => pngChunk("eXIf", data) }),
+    ...pngChunk("IDAT", [1, 2, 3]),
+    ...pngChunk("IEND", []),
+  ]);
+
+const riff = (...chunks: ReadonlyArray<readonly [string, ReadonlyArray<number>]>): Uint8Array => {
+  const body = [
+    ...ascii("WEBP"),
+    ...chunks.flatMap(([type, data]) => [
+      ...ascii(type),
+      ...le32(data.length),
+      ...data,
+      ...(data.length % 2 === 0 ? [] : [0]),
+    ]),
+  ];
+  return Uint8Array.from([...ascii("RIFF"), ...le32(body.length), ...body]);
+};
+
+// A lossless WebP image chunk of 300×200 with alpha: the VP8L signature, then
+// width − 1 and height − 1 in 14 bits each, then the alpha bit.
+const vp8l = (): readonly [string, ReadonlyArray<number>] => {
+  const bits = 299 | (199 << 14) | (1 << 28);
+  return ["VP8L", [0x2f, ...le32(bits), 0, 0, 0]];
+};
+
+// A HEIF whose Exif item lives in `idat`, with `room` bytes for it.
+const heif = (payload: ReadonlyArray<number>, room = payload.length + 4): Uint8Array => {
+  const ftyp = box("ftyp", ascii("heic"), [0, 0, 0, 0], ascii("mif1"));
+  const item = [
+    ...be32(0),
+    ...payload,
+    ...Array.from({ length: room - payload.length - 4 }, () => 0),
+  ];
+  const infe = (id: number, type: string) =>
+    box("infe", [2, 0, 0, 0], be16(id), [0, 0], ascii(type), [0]);
+  const iinf = box("iinf", [0, 0, 0, 0], be16(2), infe(1, "hvc1"), infe(2, "Exif"));
+  // iloc version 1, 4-byte offsets and lengths, no base offset; the Exif item uses idat.
+  const iloc = box(
+    "iloc",
+    [1, 0, 0, 0],
+    [0x44, 0x00],
+    be16(2),
+    [...be16(1), 0, 0, 0, 0, ...be16(1), ...be32(0), ...be32(1)],
+    [...be16(2), 0, 1, 0, 0, ...be16(1), ...be32(1), ...be32(item.length)],
+  );
+  const idat = box("idat", [0xaa], item);
+  const meta = box(
+    "meta",
+    [0, 0, 0, 0],
+    box(
+      "hdlr",
+      Array.from({ length: 24 }, () => 0),
+    ),
+    iinf,
+    iloc,
+    idat,
+  );
+  return Uint8Array.from([...ftyp, ...meta]);
+};
+
+const jxlCodestream = [0xff, 0x0a, 1, 2, 3];
+
+const jxl = (exif: Option.Option<ReadonlyArray<number>>): Uint8Array =>
+  Uint8Array.from([
+    ...box("JXL ", [0x0d, 0x0a, 0x87, 0x0a]),
+    ...box("ftyp", ascii("jxl "), [0, 0, 0, 0], ascii("jxl ")),
+    ...Option.match(exif, { onNone: () => [], onSome: (data) => box("Exif", be32(0), data) }),
+    ...box("jxlc", jxlCodestream),
+  ]);
+
 const assertSample = (exif: Option.Option<Exif.Exif>) => {
   const value = some(exif);
   assert.deepStrictEqual(Exif.orientation(value), Option.some(6));
@@ -237,7 +333,9 @@ describe("Exif", () => {
     const exif = some(Exif.fromTiff(sample));
     assert.deepStrictEqual(
       Exif.get(exif, "exif", Exif.Tag.FNumber),
-      Option.some(Exif.Value.Rationals({ values: [{ numerator: 28, denominator: 10 }] })),
+      Option.some(
+        Exif.Value.Rationals({ signed: false, values: [{ numerator: 28, denominator: 10 }] }),
+      ),
     );
     assert.deepStrictEqual(
       exif.pipe(Exif.get("gps", Exif.Tag.GPSAltitudeRef)),
@@ -248,94 +346,23 @@ describe("Exif", () => {
   describe("finds EXIF in", () => {
     it("JPEG, after other APP segments", () => assertSample(Exif.read(jpeg(sample))));
 
-    it("PNG", () => {
-      const chunk = (type: string, data: ReadonlyArray<number>) => [
-        ...be32(data.length),
-        ...ascii(type),
-        ...data,
-        0,
-        0,
-        0,
-        0,
-      ];
-      const png = Uint8Array.from([
-        0x89,
-        0x50,
-        0x4e,
-        0x47,
-        0x0d,
-        0x0a,
-        0x1a,
-        0x0a,
-        ...chunk(
-          "IHDR",
-          Array.from({ length: 13 }, () => 0),
-        ),
-        ...chunk("eXIf", [...sample]),
-        ...chunk("IEND", []),
-      ]);
-      assertSample(Exif.read(png));
-    });
+    it("PNG", () => assertSample(Exif.read(png(Option.some([...sample])))));
 
     it("WebP, with or without an Exif header", () => {
-      const webp = (exif: ReadonlyArray<number>) => {
-        const padded = exif.length % 2 === 0 ? exif : [...exif, 0];
-        const body = [
-          ...ascii("WEBP"),
-          ...ascii("VP8X"),
-          ...le32(10),
-          ...Array.from({ length: 10 }, () => 0),
-          ...ascii("EXIF"),
-          ...le32(exif.length),
-          ...padded,
-        ];
-        return Uint8Array.from([...ascii("RIFF"), ...le32(body.length), ...body]);
-      };
-      assertSample(Exif.read(webp([...sample])));
-      assertSample(Exif.read(webp([...ascii("Exif"), 0, 0, ...sample])));
+      const header: readonly [string, ReadonlyArray<number>] = [
+        "VP8X",
+        Array.from({ length: 10 }, () => 0),
+      ];
+      assertSample(Exif.read(riff(header, ["EXIF", [...sample]])));
+      assertSample(Exif.read(riff(header, ["EXIF", [...ascii("Exif"), 0, 0, ...sample]])));
     });
 
     it("TIFF", () => assertSample(Exif.read(sample)));
 
-    it("HEIF, through the meta box's item location", () => {
-      const ftyp = box("ftyp", ascii("heic"), [0, 0, 0, 0], ascii("mif1"));
-      const payload = [...be32(0), ...sample];
-      const infe = (id: number, type: string) =>
-        box("infe", [2, 0, 0, 0], be16(id), [0, 0], ascii(type), [0]);
-      const iinf = box("iinf", [0, 0, 0, 0], be16(2), infe(1, "hvc1"), infe(2, "Exif"));
-      // iloc version 1, 4-byte offsets and lengths, no base offset; the Exif item uses idat.
-      const iloc = (exifOffset: number) =>
-        box(
-          "iloc",
-          [1, 0, 0, 0],
-          [0x44, 0x00],
-          be16(2),
-          [...be16(1), 0, 0, 0, 0, ...be16(1), ...be32(0), ...be32(1)],
-          [...be16(2), 0, 1, 0, 0, ...be16(1), ...be32(exifOffset), ...be32(payload.length)],
-        );
-      const idat = box("idat", [0xaa], payload);
-      const meta = box(
-        "meta",
-        [0, 0, 0, 0],
-        box(
-          "hdlr",
-          Array.from({ length: 24 }, () => 0),
-        ),
-        iinf,
-        iloc(1),
-        idat,
-      );
-      assertSample(Exif.read(Uint8Array.from([...ftyp, ...meta])));
-    });
+    it("HEIF, through the meta box's item location", () =>
+      assertSample(Exif.read(heif([...sample]))));
 
-    it("JPEG XL, from its Exif box", () => {
-      const jxl = [
-        ...box("JXL ", [0x0d, 0x0a, 0x87, 0x0a]),
-        ...box("ftyp", ascii("jxl "), [0, 0, 0, 0], ascii("jxl ")),
-        ...box("Exif", be32(0), [...sample]),
-      ];
-      assertSample(Exif.read(Uint8Array.from(jxl)));
-    });
+    it("JPEG XL, from its Exif box", () => assertSample(Exif.read(jxl(Option.some([...sample])))));
   });
 
   describe("tolerates", () => {
@@ -383,6 +410,145 @@ describe("Exif", () => {
       assertNone(Exif.make(exif));
       assertNone(Exif.captureTime(exif));
       assertNone(Exif.location(exif));
+    });
+  });
+
+  describe("writing", () => {
+    const original = some(Exif.fromTiff(sample));
+    const edited = original.pipe(
+      Exif.set("ifd0", Exif.Tag.Software, Exif.Value.Text({ value: "effect-media" })),
+      Exif.withOrientation(1),
+    );
+    const assertEdited = (exif: Option.Option<Exif.Exif>) => {
+      const value = some(exif);
+      assert.deepStrictEqual(Exif.software(value), Option.some("effect-media"));
+      assert.deepStrictEqual(Exif.orientation(value), Option.some(1));
+      assert.deepStrictEqual(Exif.make(value), Option.some("Fujifilm"));
+    };
+    const written = (result: Result.Result<Uint8Array, Exif.WriteError>): Uint8Array =>
+      Result.match(result, {
+        onFailure: (error) => assert.fail(error.message),
+        onSuccess: (bytes) => bytes,
+      });
+
+    it("round-trips through toTiff in either byte order", () => {
+      const big = some(Exif.fromTiff(tiff({ ifd0: [field(Exif.Tag.Make, 2, "Fujifilm")] }, false)));
+      [original, big].forEach((exif) => {
+        const again = some(Exif.fromTiff(Exif.toTiff(exif)));
+        assert.strictEqual(again.littleEndian, exif.littleEndian);
+        assert.deepStrictEqual(
+          HashMap.toEntries(again.directories).map(([name, tags]) => [
+            name,
+            HashMap.toEntries(tags),
+          ]),
+          HashMap.toEntries(exif.directories).map(([name, tags]) => [
+            name,
+            HashMap.toEntries(tags),
+          ]),
+        );
+        assert.deepStrictEqual(again.thumbnail, exif.thumbnail);
+      });
+      assert.deepStrictEqual(
+        Exif.location(original),
+        Exif.location(some(Exif.fromTiff(Exif.toTiff(original)))),
+      );
+    });
+
+    it("keeps numeric field types and writes UTF-8 text", () => {
+      const exif = some(Exif.fromTiff(Exif.toTiff(edited)));
+      assert.deepStrictEqual(
+        Exif.get(exif, "ifd0", Exif.Tag.Orientation),
+        Option.some(Exif.Value.Numbers({ type: "short", values: [1] })),
+      );
+      assert.deepStrictEqual(Exif.artist(exif), Option.some("Zoë"));
+    });
+
+    it("edits tags and directories", () => {
+      assertNone(Exif.make(Exif.remove(original, "ifd0", Exif.Tag.Make)));
+      assertNone(Exif.location(Exif.removeDirectory(original, "gps")));
+      const noThumbnail = Exif.removeDirectory(original, "ifd1");
+      assertNone(noThumbnail.thumbnail);
+      assertNone(some(Exif.fromTiff(Exif.toTiff(noThumbnail))).thumbnail);
+      const noExif = Exif.removeDirectory(original, "exif");
+      assert.isFalse(HashMap.has(noExif.directories, "interop"));
+      assertNone(Exif.captureTime(noExif));
+    });
+
+    it("JPEG: replaces the segment and keeps the rest", () => {
+      const file = jpeg(sample);
+      const out = written(Exif.write(file, edited));
+      assertEdited(Exif.read(out));
+      // The image data after the start of scan is untouched.
+      assert.deepStrictEqual(out.subarray(-4), file.subarray(-4));
+      // APP0 stays first.
+      assert.deepStrictEqual([...out.subarray(2, 4)], [0xff, 0xe0]);
+      const stripped = written(Exif.strip(file));
+      assertNone(Exif.read(stripped));
+      assert.strictEqual(stripped.length, file.length - (2 + 2 + 6 + sample.length));
+    });
+
+    it("PNG: writes a valid eXIf chunk before the image data", () => {
+      const out = written(Exif.write(png(Option.none()), edited));
+      assertEdited(Exif.read(out));
+      const at = out.indexOf(0x65); // "e" of eXIf
+      const length = new DataView(out.buffer).getUint32(at - 4);
+      const crc = new DataView(out.buffer).getUint32(at + 4 + length);
+      assert.strictEqual(crc, crc32(out.subarray(at, at + 4 + length)));
+      assertNone(Exif.read(written(Exif.strip(png(Option.some([...sample]))))));
+    });
+
+    it("WebP: adds a VP8X header to a simple file, and clears its flag on stripping", () => {
+      const out = written(Exif.write(riff(vp8l()), edited));
+      assertEdited(Exif.read(out));
+      assert.strictEqual(String.fromCharCode(...out.subarray(12, 16)), "VP8X");
+      // EXIF and alpha flags, then a 300×200 canvas.
+      assert.deepStrictEqual([...out.subarray(20, 30)], [0x18, 0, 0, 0, 43, 1, 0, 199, 0, 0]);
+      assert.strictEqual(new DataView(out.buffer).getUint32(4, true), out.length - 8);
+      const stripped = written(Exif.strip(out));
+      assertNone(Exif.read(stripped));
+      assert.strictEqual(stripped[20], 0x10);
+    });
+
+    it("JPEG XL: replaces the box, or wraps a bare codestream", () => {
+      assertEdited(Exif.read(written(Exif.write(jxl(Option.some([...sample])), edited))));
+      assertNone(Exif.read(written(Exif.strip(jxl(Option.some([...sample]))))));
+      const wrapped = written(Exif.write(Uint8Array.from(jxlCodestream), edited));
+      assertEdited(Exif.read(wrapped));
+      assert.deepStrictEqual([...wrapped.subarray(-jxlCodestream.length)], jxlCodestream);
+    });
+
+    it("HEIF: overwrites in place when the data fits", () => {
+      const file = heif([...sample]);
+      const stripped = written(Exif.strip(file));
+      assert.strictEqual(stripped.length, file.length);
+      assertNone(Exif.read(stripped));
+      const roomy = heif([...sample], sample.length + 200);
+      assertEdited(Exif.read(written(Exif.write(roomy, edited))));
+      const tight = heif([...tiff({ ifd0: [field(Exif.Tag.Make, 2, "X")] })]);
+      assert.isTrue(Result.isFailure(Exif.write(tight, edited)));
+    });
+
+    it("stripLocation keeps everything but GPS", () => {
+      const out = some(Exif.read(written(Exif.stripLocation(jpeg(sample)))));
+      assertNone(Exif.location(out));
+      assert.deepStrictEqual(Exif.make(out), Option.some("Fujifilm"));
+      const noGps = jpeg(tiff({ ifd0: [field(Exif.Tag.Make, 2, "X")] }));
+      assert.strictEqual(written(Exif.stripLocation(noGps)), noGps);
+    });
+
+    it("fails for TIFF and unknown formats", () => {
+      const tiffError = Result.getFailure(Exif.write(sample, edited));
+      assert.deepStrictEqual(
+        Option.map(tiffError, (e) => e._tag),
+        Option.some("UnsupportedOperation"),
+      );
+      const unknown = Result.getFailure(Exif.strip(Uint8Array.from(ascii("hello"))));
+      assert.isTrue(Option.isNone(unknown));
+      const unknownWrite = Result.getFailure(Exif.write(Uint8Array.from(ascii("hello")), edited));
+      assert.deepStrictEqual(
+        Option.map(unknownWrite, (e) => e._tag),
+        Option.some("UnsupportedFormat"),
+      );
     });
   });
 });
