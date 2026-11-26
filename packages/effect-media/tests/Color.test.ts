@@ -87,6 +87,15 @@ describe("Color", () => {
       assert.strictEqual(p3.alpha, 0.25);
     });
 
+    it("parses opaque color() without a slash alpha", () => {
+      const p3 = ok("color(display-p3 1 0 0)");
+      assert.strictEqual(p3.space, "display-p3");
+      assert.deepStrictEqual([...p3.coords, p3.alpha], [1, 0, 0, 1]);
+      const grey = ok("color(srgb 0.5 0.5 0.5)");
+      assert.strictEqual(grey.space, "srgb");
+      assert.deepStrictEqual([...grey.coords, grey.alpha], [0.5, 0.5, 0.5, 1]);
+    });
+
     it("parses keywords", () => {
       assert.strictEqual(Color.toHex(ok("transparent")), "#00000000");
       assert.strictEqual(Color.toHex(ok(" White ")), "#ffffff");
@@ -98,6 +107,7 @@ describe("Color", () => {
         "#ff",
         "red",
         "rgb(1 2)",
+        "rgb(1 2 3 4)",
         "rgb(1 2 3 / 2)",
         "color(oklch 1 2 3)",
         "hsl(0 0% 0%)",
@@ -106,11 +116,13 @@ describe("Color", () => {
       });
     });
 
+    // Opaque colours format without a slash alpha, so check alpha = 1 on every run too.
     it.prop("round-trips through format", [Unit, Unit, Unit, Unit], ([r, g, b, a]) => {
-      const color = Color.make("display-p3", [r, g, b], a);
-      const parsed = ok(Color.format(color));
-      assert.strictEqual(parsed.space, "display-p3");
-      assertClose([...parsed.coords, parsed.alpha], [r, g, b, a], 1e-6);
+      [a, 1].forEach((alpha) => {
+        const parsed = ok(Color.format(Color.make("display-p3", [r, g, b], alpha)));
+        assert.strictEqual(parsed.space, "display-p3");
+        assertClose([...parsed.coords, parsed.alpha], [r, g, b, alpha], 1e-6);
+      });
     });
   });
 
