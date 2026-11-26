@@ -4,15 +4,30 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # pnpm holds back releases younger than a day (`minimumReleaseAge`), so a
+    # bump to a fresher version would fail `vp install`. Security updates
+    # ignore the cooldown.
+    cooldown:
+      default-days: 3
+    # A dependency joins the first group that matches it.
     groups:
       # These move together: effect-tsgo patch supports only specific
-      # TypeScript, oxlint and tsrs versions (see pnpm-workspace.yaml).
+      # TypeScript, oxlint and tsrs versions (see pnpm-workspace.yaml), and
+      # vitest must match the one vite-plus runs.
       toolchain:
         patterns: ["vite-plus", "typescript", "@effect/tsgo", "vitest"]
       effect:
         patterns: ["effect", "@effect/*"]
-        exclude-patterns: ["@effect/tsgo"]
+      # Everything else: lint rules, changesets, fallow, Node types.
+      dev-tooling:
+        patterns: ["*"]
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
