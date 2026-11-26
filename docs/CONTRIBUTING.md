@@ -27,7 +27,11 @@ The pre-commit hook ([.vite-hooks/pre-commit](../.vite-hooks/pre-commit)) runs `
 
 ### Dependencies
 
+Dependabot ([dependabot.yml](../.github/dependabot.yml)) opens every update weekly, on Wednesday morning Melbourne time: the named runtime sets (`effect` and the like) each in one PR, and every other development dependency in the single `toolchain` group. Security updates skip the schedule and open as soon as an advisory lands, one PR each. Vite+ selects Node.js from `.node-version` and pnpm from `packageManager`; pnpm's own switching is off (`runtimeOnFail` / `pmOnFail`), so one version of each is installed and used.
+
 Every external version lives in the catalog in [pnpm-workspace.yaml](../pnpm-workspace.yaml) (`catalogMode: strict`); `package.json` files reference only `catalog:` (or `catalog:peers` for peer ranges). `effect-tsgo patch` supports only specific TypeScript, Oxlint and tsrs versions, so move `vite-plus`, `typescript` and `@effect/tsgo` together.
+
+Workflows pin actions by exact tag, locked to commits by `.github/workflows/actions.lock`: run `gh actions-lock` after changing a `uses:`. The Lockfile workflow verifies it.
 
 Library source must run on every runtime (Node, Bun, Deno, browsers, Cloudflare Workers): no Node built-ins and no DOM types in `packages/*/src`. Platform APIs belong in the backend package that adapts them.
 
