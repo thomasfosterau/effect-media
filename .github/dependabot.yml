@@ -1,33 +1,59 @@
+# Shared policy (one copy per thomasfosterau repository): first-party packages
+# daily, everything else weekly on Wednesday morning in Melbourne. Security
+# updates ignore the schedule and open as soon as an advisory lands, one PR
+# each. By-hand follow-ups for the lockstep sets are in docs/CONTRIBUTING.md.
 version: 2
 updates:
-  - package-ecosystem: npm
-    directory: /
+  - package-ecosystem: "npm"
+    directory: "/"
     schedule:
-      interval: weekly
-    # Matches pnpm's default `minimumReleaseAge` of a day, so a bump to a
-    # fresher version doesn't fail `vp install`. Security updates ignore the
-    # cooldown.
+      interval: "weekly"
+      day: "wednesday"
+      time: "06:00"
+      timezone: "Australia/Melbourne"
+    open-pull-requests-limit: 10
+    assignees:
+      - thomasfosterau
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore"
+    # Matches pnpm's `minimumReleaseAge` (24 hours).
     cooldown:
       default-days: 1
-    # A dependency joins the first group that matches it.
+    # A dependency joins the first group it matches, so the named sets come
+    # first and `toolchain` takes every other development dependency.
+    # Production dependencies outside a named set get a PR each.
     groups:
-      # These move together: effect-tsgo patch supports only specific
-      # TypeScript, oxlint and tsrs versions (see pnpm-workspace.yaml), and
-      # vitest must match the one vite-plus runs.
-      toolchain:
-        patterns: ["vite-plus", "typescript", "@effect/tsgo", "vitest"]
       effect:
-        patterns: ["effect", "@effect/*"]
-      # Everything else: lint rules, changesets, fallow, Node types.
-      dev-tooling:
-        patterns: ["*"]
-      security:
-        applies-to: security-updates
-        patterns: ["*"]
-  - package-ecosystem: github-actions
-    directory: /
+        patterns:
+          - "effect"
+          - "@effect/*"
+        exclude-patterns:
+          - "@effect/language-service"
+          - "@effect/tsgo"
+      toolchain:
+        dependency-type: "development"
+        patterns:
+          - "*"
+
+  # Dependabot regenerates .github/workflows/actions.lock in the same PR.
+  - package-ecosystem: "github-actions"
+    directory: "/"
     schedule:
-      interval: weekly
+      interval: "weekly"
+      day: "wednesday"
+      time: "06:00"
+      timezone: "Australia/Melbourne"
+    assignees:
+      - thomasfosterau
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 1
     groups:
       actions:
-        patterns: ["*"]
+        patterns:
+          - "*"

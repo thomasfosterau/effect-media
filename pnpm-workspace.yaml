@@ -11,15 +11,15 @@ catalog:
   "@changesets/cli": ^3.0.3
   # `effect-tsgo patch` supports only the TypeScript, oxlint and tsrs versions
   # listed in its README; move it together with vite-plus and typescript.
-  "@effect/tsgo": 0.73.2
+  "@effect/tsgo": 0.73.4
   "@effect/vitest": 4.1.5
   "@enfect/oxlint": ^0.10.0
   "@types/node": ^26.6.5
   effect: 4.1.5
   fallow: 3.45.0
   typescript: 7.0.2
-  vite-plus: 1.7.0
-  vitest: 5.1.0
+  vite-plus: 1.8.0
+  vitest: 5.1.1
 
 catalogs:
   peers:
@@ -27,7 +27,7 @@ catalogs:
 
 overrides:
   # vite-plus ships its own build of Vite; keep every package on it.
-  vite@*: npm:@voidzero-dev/vite-plus-core@8.3.8000
+  vite@*: npm:@voidzero-dev/vite-plus-core@8.3.8001
 
 onlyBuiltDependencies:
   - "@effect/tsgo"
@@ -53,3 +53,7 @@ minimumReleaseAgeExclude:
   - "@fallow-cli/win32-x64-msvc@3.45.0"
   - effect@4.1.5
   - fallow@3.45.0
+# Vite+ selects Node.js (.node-version) and pnpm (packageManager); pnpm
+# must not download or switch to its own.
+runtimeOnFail: ignore
+pmOnFail: ignore
