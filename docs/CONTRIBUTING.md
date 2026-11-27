@@ -11,7 +11,7 @@ Read the [README](../README.md) first. Agents should also read [AGENTS.md](../AG
 
 ## Toolchain
 
-[Vite+](https://viteplus.dev) (`vp`) manages Node and pnpm; use it rather than calling them directly (`vp exec <bin>`, not `npx`). The repository is a pnpm workspace: the core package lives in `packages/effect-media`, and each backend will get its own package beside it.
+[Vite+](https://viteplus.dev) (`vp`) manages Node and pnpm; use it rather than calling them directly (`vp exec <bin>`, not `npx`). The repository is a pnpm workspace: the core package lives in `packages/effect-media`, each backend has its own package beside it (`effect-media-sharp`, `effect-media-wasm`), and `packages/conformance` holds the private test suite and fixtures every backend runs. Workspace packages resolve each other's TypeScript source through the `effect-media-source` export condition, so nothing needs building before it is type-checked or tested.
 
 | Command            | What it does                                                                             |
 | ------------------ | ---------------------------------------------------------------------------------------- |
@@ -33,7 +33,11 @@ Every external version lives in the catalog in [pnpm-workspace.yaml](../pnpm-wor
 
 Workflows pin actions by exact tag, locked to commits by `.github/workflows/actions.lock`: run `gh actions-lock` after changing a `uses:`. The Lockfile workflow verifies it.
 
-Library source must run on every runtime (Node, Bun, Deno, browsers, Cloudflare Workers): no Node built-ins and no DOM types in `packages/*/src`. Platform APIs belong in the backend package that adapts them.
+The core must run on every runtime (Node, Bun, Deno, browsers, Cloudflare Workers): no Node built-ins and no DOM types in `packages/effect-media/src`. Platform APIs belong in the backend package that adapts them, and a backend keeps any runtime-specific entry point in its own subpath module (such as `effect-media-wasm/WasmNode`), checked separately from the portable rest.
+
+### Backends
+
+A backend provides the `ImageBackend` service: `decode` (pixels as stored, without applying EXIF orientation), `encode`, and `apply` for each planned primitive (`Resample`, `Crop`, `Rotate`, `Flip`, `Pad`). The core plans every pipeline, so geometry is the same on every backend. Each backend runs the conformance suite in its tests (`suite(name, layer)`); the fixtures are regenerated with `vp run fixtures` in `packages/conformance`.
 
 ### Changesets
 

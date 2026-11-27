@@ -1,0 +1,7 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["src"],
+  // The jSquash codecs are typed with the DOM's `ImageData` and `WebAssembly`;
+  // Node's types are for the `WasmNode` loader alone (see tsconfig.portable.json).
+  "compilerOptions": { "lib": ["es2023", "dom"], "types": ["node"] }
+}

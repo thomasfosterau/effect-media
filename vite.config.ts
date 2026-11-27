@@ -4,7 +4,17 @@ import { defineConfig } from "vite-plus";
 
 const ignorePatterns = ["**/dist/**", "**/coverage/**", "**/node_modules/**", ".changeset/*.md"];
 
-const packages = ["effect-media"] as const;
+// Each package's type-check projects: its `src` first, then its tests.
+const typeChecks = [
+  "packages/effect-media/tsconfig.json",
+  "packages/effect-media/tests/tsconfig.json",
+  "packages/effect-media-sharp/tsconfig.json",
+  "packages/effect-media-sharp/tests/tsconfig.json",
+  "packages/effect-media-wasm/tsconfig.json",
+  "packages/effect-media-wasm/tsconfig.portable.json",
+  "packages/effect-media-wasm/tests/tsconfig.json",
+  "packages/conformance/tsconfig.json",
+] as const;
 
 export default defineConfig({
   // Staged-file checks run by `vp staged` (pre-commit).
@@ -30,6 +40,24 @@ export default defineConfig({
         rules: { "effect/imperative-loops": "off" },
       },
       {
+        // Per-pixel loops over byte buffers: an `Array` pipeline here would
+        // allocate for every pixel.
+        files: ["packages/*/src/internal/kernels.ts"],
+        rules: { "effect/imperative-loops": "off" },
+      },
+      {
+        // Node-only code that reads files without pulling in a platform
+        // package: the wasm Node loader, the test harness and its fixtures.
+        files: ["packages/effect-media-wasm/src/WasmNode.ts", "packages/conformance/**"],
+        rules: { "effect/use-filesystem-service": "off", "effect/avoid-sync-fs": "off" },
+      },
+      {
+        // One-off Node scripts, such as the fixture generator: plain
+        // sequential code reads best.
+        files: ["packages/*/scripts/**"],
+        rules: { "effect/imperative-loops": "off" },
+      },
+      {
         files: ["**/tests/**"],
         rules: {
           // Count the `assert*` helpers tests share as assertions.
@@ -45,12 +73,9 @@ export default defineConfig({
     cache: true,
     tasks: {
       // The type gate of record: the Effect-patched tsc over each package's
-      // source (no Node types) and then its tests.
+      // source (the core without Node or DOM types) and then its tests.
       check: {
-        command: packages.flatMap((name) => [
-          `tsc -p packages/${name}/tsconfig.json`,
-          `tsc -p packages/${name}/tests/tsconfig.json`,
-        ]),
+        command: typeChecks.map((project) => `tsc -p ${project}`),
       },
       build: {
         command: "vp run -r build",
